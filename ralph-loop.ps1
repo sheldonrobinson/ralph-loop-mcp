@@ -34,13 +34,13 @@ $Red = 'Red'; $Green = 'Green'; $Yellow = 'Yellow'; $Blue = 'Cyan'; $Gray = 'Gra
 function Write-Color { param([string]$Message, [ConsoleColor]$Color = 'White'); Write-Host $Message -ForegroundColor $Color }
 
 function Write-Header {
-    Write-Color "═══════════════════════════════════════════════════════════════" $Blue
+    Write-Color "===============================================================" $Blue
     Write-Color "  Ralph Loop - Multi-Model Edition" $Blue
-    Write-Color "═══════════════════════════════════════════════════════════════" $Blue
+    Write-Color "===============================================================" $Blue
     Write-Host ""
 }
 
-function Write-Step { param([string]$Message); Write-Host ""; Write-Color "───────────────────────────────────────────────────────────────" $Blue; Write-Color "  $Message" $Blue; Write-Color "───────────────────────────────────────────────────────────────" $Blue; Write-Host "" }
+function Write-Step { param([string]$Message); Write-Host ""; Write-Color "---------------------------------------------------------------" $Blue; Write-Color "  $Message" $Blue; Write-Color "---------------------------------------------------------------" $Blue; Write-Host "" }
 
 function Call-Mcp {
     param([string]$Method, [string]$Params, [string]$SessionId)
@@ -139,7 +139,7 @@ function Call-ReviewerLlm {
     param([string]$Task, [string]$Work, [string]$Summary, [int]$Iteration, [string]$SessionId)
     
     $prompt = @"
-You are the REVIEWERVIEWERVIEWER in a Ralph Loop iteration $Iteration.
+You are the REVIEWER in a Ralph Loop iteration $Iteration.
 
 Original Task: $Task
 
@@ -229,7 +229,7 @@ if (-not $script:WorkerModel -or -not $script:WorkerProvider -or -not $script:Re
 }
 
 # Cost warning
-Write-Color "⚠️  Cost Warning: This will run up to $($script:MaxIterations) iterations, each using both models." $Yellow
+Write-Color "Warning: This will run up to $($script:MaxIterations) iterations, each using both models." $Yellow
 Write-Host -NoNewline "Continue? [y/N]: "
 $confirm = Read-Host
 if ($confirm -ne 'y' -and $confirm -ne 'Y') { exit 1 }
@@ -254,13 +254,13 @@ for ($i = 1; $i -le $script:MaxIterations; $i++) {
     Write-Step "Iteration $i / $($script:MaxIterations)"
     
     # WORK PHASE
-    Write-Color "▶ WORK PHASE" $Yellow
+    Write-Color "WORK PHASE" $Yellow
     Write-Color "Worker: $($script:WorkerModel) ($($script:WorkerProvider))" $Gray
     
     $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId
     
     if (-not $workerOutput) {
-        Write-Color "✗ WORK PHASE FAILED - No output from worker" $Red
+        Write-Color "WORK PHASE FAILED - No output from worker" $Red
         exit 1
     }
     
@@ -269,7 +269,7 @@ for ($i = 1; $i -le $script:MaxIterations; $i++) {
     $summary = $parsed.summary
     
     if (-not $work -or -not $summary) {
-        Write-Color "✗ WORK PHASE FAILED - Could not parse output" $Red
+        Write-Color "WORK PHASE FAILED - Could not parse output" $Red
         Write-Host "Raw output: $workerOutput"
         exit 1
     }
@@ -284,13 +284,13 @@ for ($i = 1; $i -le $script:MaxIterations; $i++) {
     Write-Host ""
     
     # REVIEW PHASE
-    Write-Color "▶ REVIEW PHASE" $Yellow
+    Write-Color "REVIEW PHASE" $Yellow
     Write-Color "Reviewer: $($script:ReviewerModel) ($($script:ReviewerProvider))" $Gray
     
     $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId
     
     if (-not $reviewerOutput) {
-        Write-Color "✗ REVIEW PHASE FAILED - No output from reviewer" $Red
+        Write-Color "REVIEW PHASE FAILED - No output from reviewer" $Red
         exit 1
     }
     
@@ -299,7 +299,7 @@ for ($i = 1; $i -le $script:MaxIterations; $i++) {
     $feedback = $parsed.feedback
     
     if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') {
-        Write-Color "✗ REVIEW PHASE FAILED - Invalid decision: $decision" $Red
+        Write-Color "REVIEW PHASE FAILED - Invalid decision: $decision" $Red
         Write-Host "Raw output: $reviewerOutput"
         exit 1
     }
@@ -311,19 +311,19 @@ for ($i = 1; $i -le $script:MaxIterations; $i++) {
     
     if ($decision -eq 'SHIP') {
         Write-Host ""
-        Write-Color "═══════════════════════════════════════════════════════════════" $Green
-        Write-Color "  ✓ SHIPPED after $i iteration(s)" $Green
-        Write-Color "═══════════════════════════════════════════════════════════════" $Green
+        Write-Color "===============================================================" $Green
+        Write-Color "  SHIPPED after $i iteration(s)" $Green
+        Write-Color "===============================================================" $Green
         Write-Host "Session: $sessionId"
         Write-Host "Complete: $(Get-Date)"
         exit 0
     } else {
         Write-Host ""
-        Write-Color "↻ REVISE - Feedback for next iteration:" $Yellow
+        Write-Color "REVISE - Feedback for next iteration:" $Yellow
         Write-Host $feedback
         Write-Host ""
     }
 }
 
-Write-Color "✗ Max iterations ($($script:MaxIterations)) reached" $Red
+Write-Color "Max iterations ($($script:MaxIterations)) reached" $Red
 exit 1

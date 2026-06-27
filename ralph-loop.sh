@@ -27,16 +27,16 @@ TASK_INPUT="${1:-}"
 
 # Helper functions
 print_header() {
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}===============================================================${NC}"
     echo -e "${BLUE}  Ralph Loop - Multi-Model Edition${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}===============================================================${NC}"
     echo ""
 }
 
 print_step() {
-    echo -e "${BLUE}───────────────────────────────────────────────────────────────${NC}"
+    echo -e "${BLUE}---------------------------------------------------------------${NC}"
     echo -e "${BLUE}  $1${NC}"
-    echo -e "${BLUE}───────────────────────────────────────────────────────────────${NC}"
+    echo -e "${BLUE}---------------------------------------------------------------${NC}"
     echo ""
 }
 
@@ -273,7 +273,7 @@ main() {
     fi
     
     # Cost warning
-    echo -e "${YELLOW}⚠️  Cost Warning:${NC} This will run up to ${MAX_ITERATIONS} iterations, each using both models."
+    echo -e "${YELLOW}Warning: This will run up to ${MAX_ITERATIONS} iterations, each using both models.${NC}"
     echo -ne "Continue? [y/N]: "
     read -r confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -299,14 +299,14 @@ main() {
         print_step "Iteration $i / $MAX_ITERATIONS"
         
         # WORK PHASE
-        echo -e "${YELLOW}▶ WORK PHASE${NC}"
+        echo -e "${YELLOW}WORK PHASE${NC}"
         echo "Worker: $WORKER_MODEL ($WORKER_PROVIDER)"
         
         local worker_output
         worker_output=$(call_worker_llm "$task" "$feedback" "$i" "$session_id")
         
         if [[ -z "$worker_output" ]]; then
-            echo -e "${RED}✗ WORK PHASE FAILED - No output from worker${NC}"
+            echo -e "${RED}WORK PHASE FAILED - No output from worker${NC}"
             exit 1
         fi
         
@@ -317,7 +317,7 @@ main() {
         local summary=$(echo "$parsed" | cut -d'|' -f2)
         
         if [[ -z "$work" || -z "$summary" ]]; then
-            echo -e "${RED}✗ WORK PHASE FAILED - Could not parse output${NC}"
+            echo -e "${RED}WORK PHASE FAILED - Could not parse output${NC}"
             echo "Raw output: $worker_output"
             exit 1
         fi
@@ -330,14 +330,14 @@ main() {
         echo ""
         
         # REVIEW PHASE
-        echo -e "${YELLOW}▶ REVIEW PHASE${NC}"
+        echo -e "${YELLOW}REVIEW PHASE${NC}"
         echo "Reviewer: $REVIEWER_MODEL ($REVIEWER_PROVIDER)"
         
         local reviewer_output
         reviewer_output=$(call_reviewer_llm "$task" "$work" "$summary" "$i" "$session_id")
         
         if [[ -z "$reviewer_output" ]]; then
-            echo -e "${RED}✗ REVIEW PHASE FAILED - No output from reviewer${NC}"
+            echo -e "${RED}REVIEW PHASE FAILED - No output from reviewer${NC}"
             exit 1
         fi
         
@@ -347,7 +347,7 @@ main() {
         feedback=$(echo "$parsed" | cut -d'|' -f2)
         
         if [[ "$decision" != "SHIP" && "$decision" != "REVISE" ]]; then
-            echo -e "${RED}✗ REVIEW PHASE FAILED - Invalid decision: $decision${NC}"
+            echo -e "${RED}REVIEW PHASE FAILED - Invalid decision: $decision${NC}"
             echo "Raw output: $reviewer_output"
             exit 1
         fi
@@ -358,21 +358,21 @@ main() {
         
         if [[ "$decision" == "SHIP" ]]; then
             echo ""
-            echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-            echo -e "${GREEN}  ✓ SHIPPED after $i iteration(s)${NC}"
-            echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+            echo -e "${GREEN}===============================================================${NC}"
+            echo -e "${GREEN}  SHIPPED after $i iteration(s)${NC}"
+            echo -e "${GREEN}===============================================================${NC}"
             echo "Session: $session_id"
             echo "Complete: $(date)"
             exit 0
         else
             echo ""
-            echo -e "${YELLOW}↻ REVISE - Feedback for next iteration:${NC}"
+            echo -e "${YELLOW}REVISE - Feedback for next iteration:${NC}"
             echo "$feedback"
             echo ""
         fi
     done
     
-    echo -e "${RED}✗ Max iterations ($MAX_ITERATIONS) reached${NC}"
+    echo -e "${RED}Max iterations ($MAX_ITERATIONS) reached${NC}"
     exit 1
 }
 
