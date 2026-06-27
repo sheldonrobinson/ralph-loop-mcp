@@ -1,0 +1,38 @@
+{
+  "name": "ralph-loop-mcp",
+  "version": "1.0.0",
+  "description": "Cross-platform MCP server implementing the Ralph Loop - a multi-model iterative development technique with worker and reviewer phases",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "ralph-loop-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ralph-loop",
+    "ralph-wiggum",
+    "ai-agent",
+    "goose",
+    "cross-model-review",
+    "iterative-development"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
