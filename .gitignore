@@ -3,4 +3,5 @@ dist/
 *.log
 .env
 .DS_Store
-Thumbs.db"notes/"  
+Thumbs.db
+notes/
