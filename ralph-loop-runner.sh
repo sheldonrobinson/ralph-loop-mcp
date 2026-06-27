@@ -1133,6 +1133,10 @@ SUMMARY:
             google)
                 worker_output=$(echo "${worker_prompt}" | gemini --model "${worker_model}" --format=text 2>/dev/null)
                 ;;
+            copilot)
+                # GitHub Copilot CLI
+                worker_output=$(echo "${worker_prompt}" | copilot -p --allow-all-tools --model "${worker_model}" 2>/dev/null)
+                ;;
             goose)
                 if [[ -n "${work_guidelines}" && -f "${work_guidelines}" ]]; then
                     GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
@@ -1190,6 +1194,10 @@ FEEDBACK: [your feedback, or empty if SHIP]"
                 ;;
             google)
                 reviewer_output=$(echo "${reviewer_prompt}" | gemini --model "${reviewer_model}" --format=text 2>/dev/null)
+                ;;
+            copilot)
+                # GitHub Copilot CLI
+                reviewer_output=$(echo "${reviewer_prompt}" | copilot -p --allow-all-tools --model "${reviewer_model}" 2>/dev/null)
                 ;;
             goose)
                 if [[ -n "${review_guidelines}" && -f "${review_guidelines}" ]]; then
