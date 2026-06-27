@@ -45,11 +45,11 @@ The Ralph Loop implements a two-phase iterative workflow:
 
 ## Features
 
-- **Cross-platform Native**: Bash (Linux/macOS) and PowerShell (Windows) implementations — no Node.js runtime required
+- **Cross-platform Native**: Single script per platform (Bash for Linux/macOS, PowerShell for Windows) — no Node.js runtime required
 - **MCP Compliant**: JSON-RPC 2.0 over stdio
 - **Session-based**: Multiple concurrent Ralph Loop sessions supported
 - **File-based State**: Persistent state stored in `~/.goose/ralph/{sessionId}/`
-- **10 Tools**: Complete workflow control via MCP tools
+- **11 Tools**: Complete workflow control via MCP tools, including `ralph_loop_run` for full automation
 - **Cross-Model Review**: Worker/reviewer model configuration with validation
 
 ## Implementations
@@ -59,7 +59,7 @@ The Ralph Loop implements a two-phase iterative workflow:
 | Linux/macOS | `ralph-loop-mcp.sh` | bash, jq |
 | Windows | `ralph-loop-mcp.ps1` | PowerShell 5.1+, jq |
 
-Both implementations provide identical functionality.
+Both implementations provide identical functionality in a single script file each.
 
 ## Installation
 
@@ -74,8 +74,7 @@ Both implementations provide identical functionality.
 # Make executable
 chmod +x ralph-loop-mcp.sh
 
-# Run directly:
-
+# Configure in Claude Desktop:
 {
   "mcpServers": {
     "ralph-loop": {
@@ -90,8 +89,12 @@ chmod +x ralph-loop-mcp.sh
 ```powershell
 # Ensure jq is installed
 # choco install jq
-# or: winget install jqlang.jq In claude_desktop_config.json: {
-  "mcpServers": {    "ralph-loop": {
+# or: winget install jqlang.jq
+
+# Configure in claude_desktop_config.json:
+{
+  "mcpServers": {
+    "ralph-loop": {
       "command": "powershell.exe",
       "args": ["-File", "C:\\path\\to\\ralph-loop-mcp.ps1"]
     }
@@ -99,31 +102,7 @@ chmod +x ralph-loop-mcp.sh
 }
 ```
 
-### Node.js Version (Alternative)
-
-```bash
-# Clone and install
-git clone <repository-url>
-cd ralph-loop-mcp
-npm install
-npm run build
-```
-
-**Claude Desktop (Node.js):**
-```json
-{
-  "mcpServers": {
-    "ralph-loop": {
-      "command": "node",
-      "args": ["path/to/ralph-loop-mcp/dist/index.js"]
-    }
-  }
-}
-```
-
-## Usage with MCP Clients
-
-### Goose (Native Shell)
+### Goose
 
 ```bash
 # Linux/macOS
@@ -143,79 +122,17 @@ goose session --mcp ralph-loop --command "powershell.exe" --args "-File C:\\path
 powershell.exe -File ralph-loop-mcp.ps1
 ```
 
-## Running the Ralph Loop (Orchestration Scripts)
+## Usage
 
-The MCP server manages state, but you also need an orchestration script to actually run the worker/reviewer loop with different LLM models. Use these scripts for automated end-to-end execution:
+### Quick Start: Full Automated Loop (Recommended)
 
-### Linux/macOS (Bash)
-```bash
-# Make executable
-chmod +x ralph-loop.sh
-
-# Run with task from command line
-./ralph-loop.sh "Implement user authentication with JWT tokens"
-
-# Run with task from file
-./ralph-loop.sh /path/to/task.md
-
-# With environment variables (skips prompts)
-RALPH_WORKER_MODEL=claude-3-5-sonnet \
-RALPH_WORKER_PROVIDER=anthropic \
-RALPH_REVIEWER_MODEL=gpt-4o \
-RALPH_REVIEWER_PROVIDER=openai \
-RALPH_MAX_ITERATIONS=5 \
-./ralph-loop.sh "Your task here"
-```
-
-### Windows (PowerShell)
-```powershell
-# Run with task from command line
-.\ralph-loop.ps1 "Implement user authentication with JWT tokens"
-
-# Run with task from file
-.\ralph-loop.ps1 C:\path\to\task.md
-
-# With environment variables (skips prompts)
-$env:RALPH_WORKER_MODEL = "claude-3-5-sonnet"
-$env:RALPH_WORKER_PROVIDER = "anthropic"
-$env:RALPH_REVIEWER_MODEL = "gpt-4o"
-$env:RALPH_REVIEWER_PROVIDER = "openai"
-$env:RALPH_MAX_ITERATIONS = 5
-.\ralph-loop.ps1 "Your task here"
-```
-
-The orchestration script will:
-1. Initialize a session with the MCP server
-2. Run the WORK phase using the worker model
-3. Run the REVIEW phase using the reviewer model
-4. Loop until SHIP or max iterations reached
-
-**Requirements:** jq + LLM CLI (claude, openai, gemini, or goose)
-
-## Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `ralph_loop_initialize` | Initialize a new Ralph Loop session with a task |
-| `ralph_loop_get_task` | Get the current task for the worker phase |
-| `ralph_loop_submit_work` | Submit work results and summary from worker |
-| `ralph_loop_get_work` | Get worker's submitted work for reviewer |
-| `ralph_loop_submit_review` | Submit review decision (SHIP/REVISE) with feedback |
-| `ralph_loop_get_feedback` | Get reviewer feedback for next iteration |
-| `ralph_loop_get_status` | Get current session status (iteration, phase, state) |
-| `ralph_loop_get_config` | Get worker/reviewer model configuration |
-| `ralph_loop_reset` | Reset/clear a session |
-| `ralph_loop_block` | Block current iteration with reason |
-
-## Workflow Example
-
-### 1. Initialize a Session
+Use the `ralph_loop_run` tool to run the complete worker/reviewer loop automatically:
 
 ```json
 {
   "method": "tools/call",
   "params": {
-    "name": "ralph_loop_initialize",
+    "name": "ralph_loop_run",
     "arguments": {
       "sessionId": "my-feature",
       "task": "Implement user authentication with JWT tokens",
@@ -230,20 +147,44 @@ The orchestration script will:
 }
 ```
 
-### 2. Worker Phase - Get Task
+This tool handles:
+1. **Initialization** - Creates session with worker/reviewer configuration
+2. **Orchestration** - Loops through WORK → REVIEW phases
+3. **Execution** - Calls LLM providers via CLI (claude, openai, gemini, goose)
+4. **State Management** - Persists all state to `~/.goose/ralph/{sessionId}/`
 
+### Manual Step-by-Step Workflow
+
+For more control, use individual tools:
+
+1. **Initialize Session**
 ```json
 {
   "method": "tools/call",
   "params": {
-    "name": "ralph_loop_get_task",
-    "arguments": { "sessionId": "my-feature" }
+    "name": "ralph_loop_initialize",
+    "arguments": {
+      "sessionId": "my-feature",
+      "task": "Implement user authentication with JWT tokens",
+      "maxIterations": 5,
+      "workerModel": "claude-3-5-sonnet",
+      "workerProvider": "anthropic",
+      "reviewerModel": "gpt-4o",
+      "reviewerProvider": "openai"
+    }
   }
 }
 ```
 
-### 3. Worker Phase - Submit Work
+2. **Worker Phase - Get Task**
+```json
+{
+  "method": "tools/call",
+  "params": { "name": "ralph_loop_get_task", "arguments": { "sessionId": "my-feature" } }
+}
+```
 
+3. **Worker Phase - Submit Work**
 ```json
 {
   "method": "tools/call",
@@ -259,20 +200,15 @@ The orchestration script will:
 }
 ```
 
-### 4. Reviewer Phase - Get Work
-
+4. **Reviewer Phase - Get Work**
 ```json
 {
   "method": "tools/call",
-  "params": {
-    "name": "ralph_loop_get_work",
-    "arguments": { "sessionId": "my-feature" }
-  }
+  "params": { "name": "ralph_loop_get_work", "arguments": { "sessionId": "my-feature" } }
 }
 ```
 
-### 5. Reviewer Phase - Submit Review
-
+5. **Reviewer Phase - Submit Review**
 ```json
 {
   "method": "tools/call",
@@ -288,41 +224,29 @@ The orchestration script will:
 }
 ```
 
-### 6. Next Iteration - Get Feedback
-
+6. **Next Iteration - Get Feedback**
 ```json
 {
   "method": "tools/call",
-  "params": {
-    "name": "ralph_loop_get_feedback",
-    "arguments": { "sessionId": "my-feature" }
-  }
+  "params": { "name": "ralph_loop_get_feedback", "arguments": { "sessionId": "my-feature" } }
 }
 ```
 
-### 7. Check Status
+## Available Tools
 
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "ralph_loop_get_status",
-    "arguments": { "sessionId": "my-feature" }
-  }
-}
-```
-
-### 8. Get Configuration
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "ralph_loop_get_config",
-    "arguments": { "sessionId": "my-feature" }
-  }
-}
-```
+| Tool | Description |
+|------|-------------|
+| `ralph_loop_initialize` | Initialize a new Ralph Loop session with a task |
+| `ralph_loop_get_task` | Get the current task for the worker phase |
+| `ralph_loop_submit_work` | Submit work results and summary from worker |
+| `ralph_loop_get_work` | Get worker's submitted work for reviewer |
+| `ralph_loop_submit_review` | Submit review decision (SHIP/REVISE) with feedback |
+| `ralph_loop_get_feedback` | Get reviewer feedback for next iteration |
+| `ralph_loop_get_status` | Get current session status (iteration, phase, state) |
+| `ralph_loop_get_config` | Get worker/reviewer model configuration |
+| `ralph_loop_reset` | Reset/clear a session |
+| `ralph_loop_block` | Block current iteration with reason |
+| `ralph_loop_run` | **Run complete automated loop** (initialization → orchestration → execution → state management) |
 
 ## State Management
 
@@ -462,20 +386,18 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 }
 ```
 
-## Development (Node.js Version)
-
-```bash
-# Install dependencies
-npm install
-
-# Build TypeScript
-npm run build
-
-# Run server
-npm start
-
-# Development (build + run)
-npm run dev
+### ralph_loop_run
+```typescript
+{
+  sessionId?: string;              // default: "default"
+  task: string;                    // required
+  maxIterations?: number;          // default: 10, max: 50
+  workerModel: string;             // required, e.g., "claude-3-5-sonnet"
+  workerProvider: string;          // required, e.g., "anthropic"
+  reviewerModel: string;           // required, e.g., "gpt-4o"
+  reviewerProvider: string;        // required, e.g., "openai"
+  crossModelReviewEnforced?: boolean; // default: true
+}
 ```
 
 ## Requirements
@@ -486,6 +408,8 @@ npm run dev
   - Windows: `choco install jq` / `winget install jqlang.jq` / `scoop install jq`
 
 - **Bash** (Linux/macOS) or **PowerShell 5.1+** (Windows)
+
+- **LLM CLI** (for `ralph_loop_run`): `claude`, `openai`, `gemini`, or `goose`
 
 ## License
 
