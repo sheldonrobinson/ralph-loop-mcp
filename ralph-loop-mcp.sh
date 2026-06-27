@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ralph Loop MCP Server - Bash Implementation
 # Cross-platform MCP server implementing the Ralph Loop iterative development technique
-# For Linux/macOS
+# For Linux/macOS - COMBINED: MCP Server + Orchestration
 
 set -euo pipefail
 
@@ -54,12 +54,6 @@ json_response() {
     fi
     resp+='}'
     echo "${resp}"
-}
-
-read_json_field() {
-    local json="${1}"
-    local field="${2}"
-    echo "${json}" | jq -r ".${field} // empty"
 }
 
 # Config management
@@ -309,7 +303,6 @@ get_status() {
         cross_model_warning=$(echo "${cross_model_validation}" | jq -r '.warning // empty')
     fi
     
-    # Build status JSON
     local status_json
     status_json=$(jq -n \
         --arg sessionId "${session_id}" \
@@ -377,7 +370,142 @@ block_iteration() {
     echo "${reason}" > "$(get_state_file "${session_id}" "RALPH-BLOCKED.md")"
 }
 
-# Tool handlers
+# =============================================================================
+# ORCHESTRATION FUNCTIONS (combined from ralph-loop.sh)
+# =============================================================================
+
+call_llm_worker() {
+    local task="$1"
+    local feedback="$2"
+    local iteration="$3"
+    local session_id="$4"
+    local worker_model="$5"
+    local worker_provider="$6"
+    
+    local prompt="You are the WORKER in a Ralph Loop iteration ${iteration}.
+    
+Task: ${task}"
+    
+    if [[ -n "${feedback}" ]]; then
+        prompt="${prompt}
+
+Previous feedback from reviewer: ${feedback}
+
+Please revise your work based on this feedback."
+    fi
+    
+    prompt="${prompt}
+
+Provide your complete work output and a brief summary.
+Output format:
+WORK:
+[your complete work here]
+
+SUMMARY:
+[brief summary of what you did]"
+    
+    case "${worker_provider}" in
+        anthropic)
+            echo "${prompt}" | claude --model "${worker_model}" --print 2>/dev/null
+            ;;
+        openai)
+            echo "${prompt}" | openai chat --model "${worker_model}" --no-stream 2>/dev/null
+            ;;
+        google)
+            echo "${prompt}" | gemini --model "${worker_model}" --format=text 2>/dev/null
+            ;;
+        goose)
+            GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
+            goose run --recipe ralph-work --session "${session_id}" --task "${task}" --feedback "${feedback}" 2>/dev/null
+            ;;
+        *)
+            echo "Error: Unknown provider ${worker_provider}" >&2
+            return 1
+            ;;
+    esac
+}
+
+call_llm_reviewer() {
+    local task="$1"
+    local work="$2"
+    local summary="$3"
+    local iteration="$4"
+    local session_id="$5"
+    local reviewer_model="$6"
+    local reviewer_provider="$7"
+    
+    local prompt="You are the REVIEWER in a Ralph Loop iteration ${iteration}.
+    
+Original Task: ${task}
+
+Worker's Work:
+${work}
+
+Worker's Summary: ${summary}
+
+Review this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).
+If REVISE, provide specific, actionable feedback for the worker.
+
+Output format:
+DECISION: SHIP or REVISE
+FEEDBACK: [your feedback, or empty if SHIP]"
+    
+    case "${reviewer_provider}" in
+        anthropic)
+            echo "${prompt}" | claude --model "${reviewer_model}" --print 2>/dev/null
+            ;;
+        openai)
+            echo "${prompt}" | openai chat --model "${reviewer_model}" --no-stream 2>/dev/null
+            ;;
+        google)
+            echo "${prompt}" | gemini --model "${reviewer_model}" --format=text 2>/dev/null
+            ;;
+        goose)
+            GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
+            goose run --recipe ralph-review --session "${session_id}" --work "${work}" --summary "${summary}" 2>/dev/null
+            ;;
+        *)
+            echo "Error: Unknown provider ${reviewer_provider}" >&2
+            return 1
+            ;;
+    esac
+}
+
+parse_worker_output() {
+    local output="$1"
+    local work=""
+    local summary=""
+    
+    if [[ "${output}" == *"WORK:"* ]]; then
+        work=$(echo "${output}" | sed -n '/^WORK:/,/^SUMMARY:/p' | sed '1d;$d' | sed '/^$/d')
+    fi
+    if [[ "${output}" == *"SUMMARY:"* ]]; then
+        summary=$(echo "${output}" | sed -n '/^SUMMARY:/,$p' | sed '1d' | sed '/^$/d')
+    fi
+    
+    echo "${work}|${summary}"
+}
+
+parse_reviewer_output() {
+    local output="$1"
+    local decision=""
+    local feedback=""
+    
+    if [[ "${output}" == *"DECISION:"* ]]; then
+        decision=$(echo "${output}" | grep -i "^DECISION:" | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+        decision=$(echo "${decision}" | tr '[:lower:]' '[:upper:]')
+    fi
+    if [[ "${output}" == *"FEEDBACK:"* ]]; then
+        feedback=$(echo "${output}" | sed -n '/^FEEDBACK:/,$p' | sed '1d' | sed '/^$/d')
+    fi
+    
+    echo "${decision}|${feedback}"
+}
+
+# =============================================================================
+# TOOL HANDLERS
+# =============================================================================
+
 handle_initialize() {
     local id="${1}"
     local params="${2}"
@@ -632,14 +760,192 @@ handle_block() {
     echo $(json_response "${id}" "${result}")
 }
 
+# =============================================================================
+# MAIN ORCHESTRATION TOOL: ralph_loop_run
+# =============================================================================
+
+handle_run() {
+    local id="${1}"
+    local params="${2}"
+    local session_id task max_iterations worker_model worker_provider reviewer_model reviewer_provider cross_model_enforced
+    
+    session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
+    task=$(echo "${params}" | jq -r '.task // empty')
+    max_iterations=$(echo "${params}" | jq -r '.maxIterations // 10')
+    worker_model=$(echo "${params}" | jq -r '.workerModel // empty')
+    worker_provider=$(echo "${params}" | jq -r '.workerProvider // empty')
+    reviewer_model=$(echo "${params}" | jq -r '.reviewerModel // empty')
+    reviewer_provider=$(echo "${params}" | jq -r '.reviewerProvider // empty')
+    cross_model_enforced=$(echo "${params}" | jq -r '.crossModelReviewEnforced // true')
+    
+    if [[ -z "${task}" ]]; then
+        echo $(json_response "${id}" "" '{"code":-32602,"message":"Task is required"}')
+        return
+    fi
+    
+    if [[ -z "${worker_model}" || -z "${worker_provider}" || -z "${reviewer_model}" || -z "${reviewer_provider}" ]]; then
+        echo $(json_response "${id}" "" '{"code":-32602,"message":"workerModel, workerProvider, reviewerModel, and reviewerProvider are required"}')
+        return
+    fi
+    
+    # Initialize session (combines initialize + config)
+    set_task "${session_id}" "${task}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}"
+    
+    local feedback=""
+    local result
+    
+    for ((i=1; i<=max_iterations; i++)); do
+        # WORK PHASE
+        local worker_prompt="You are the WORKER in a Ralph Loop iteration ${i}.
+    
+Task: ${task}"
+        
+        if [[ -n "${feedback}" ]]; then
+            worker_prompt="${worker_prompt}
+
+Previous feedback from reviewer: ${feedback}
+
+Please revise your work based on this feedback."
+        fi
+        
+        worker_prompt="${worker_prompt}
+
+Provide your complete work output and a brief summary.
+Output format:
+WORK:
+[your complete work here]
+
+SUMMARY:
+[brief summary of what you did]"
+        
+        local worker_output
+        case "${worker_provider}" in
+            anthropic)
+                worker_output=$(echo "${worker_prompt}" | claude --model "${worker_model}" --print 2>/dev/null)
+                ;;
+            openai)
+                worker_output=$(echo "${worker_prompt}" | openai chat --model "${worker_model}" --no-stream 2>/dev/null)
+                ;;
+            google)
+                worker_output=$(echo "${worker_prompt}" | gemini --model "${worker_model}" --format=text 2>/dev/null)
+                ;;
+            goose)
+                GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
+                worker_output=$(goose run --recipe ralph-work --session "${session_id}" --task "${task}" --feedback "${feedback}" 2>/dev/null)
+                ;;
+            *)
+                echo $(json_response "${id}" "" '{"code":-32602,"message":"Unknown worker provider: '"${worker_provider}"'"}')
+                return
+                ;;
+        esac
+        
+        if [[ -z "${worker_output}" ]]; then
+            echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - No output from worker"}')
+            return
+        fi
+        
+        # Parse worker output
+        local work summary
+        work=$(echo "${worker_output}" | sed -n '/^WORK:/,/^SUMMARY:/p' | sed '1d;$d' | sed '/^$/d')
+        summary=$(echo "${worker_output}" | sed -n '/^SUMMARY:/,$p' | sed '1d' | sed '/^$/d')
+        
+        if [[ -z "${work}" || -z "${summary}" ]]; then
+            echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - Could not parse output"}')
+            return
+        fi
+        
+        # Submit work via internal state functions
+        set_work "${session_id}" "${work}" "${summary}" "${i}"
+        
+        # REVIEW PHASE
+        local reviewer_prompt="You are the REVIEWER in a Ralph Loop iteration ${i}.
+    
+Original Task: ${task}
+
+Worker's Work:
+${work}
+
+Worker's Summary: ${summary}
+
+Review this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).
+If REVISE, provide specific, actionable feedback for the worker.
+
+Output format:
+DECISION: SHIP or REVISE
+FEEDBACK: [your feedback, or empty if SHIP]"
+        
+        local reviewer_output
+        case "${reviewer_provider}" in
+            anthropic)
+                reviewer_output=$(echo "${reviewer_prompt}" | claude --model "${reviewer_model}" --print 2>/dev/null)
+                ;;
+            openai)
+                reviewer_output=$(echo "${reviewer_prompt}" | openai chat --model "${reviewer_model}" --no-stream 2>/dev/null)
+                ;;
+            google)
+                reviewer_output=$(echo "${reviewer_prompt}" | gemini --model "${reviewer_model}" --format=text 2>/dev/null)
+                ;;
+            goose)
+                GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
+                reviewer_output=$(goose run --recipe ralph-review --session "${session_id}" --work "${work}" --summary "${summary}" 2>/dev/null)
+                ;;
+            *)
+                echo $(json_response "${id}" "" '{"code":-32602,"message":"Unknown reviewer provider: '"${reviewer_provider}"'"}')
+                return
+                ;;
+        esac
+        
+        if [[ -z "${reviewer_output}" ]]; then
+            echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - No output from reviewer"}')
+            return
+        fi
+        
+        # Parse reviewer output
+        local decision
+        decision=$(echo "${reviewer_output}" | grep -i "^DECISION:" | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+        decision=$(echo "${decision}" | tr '[:lower:]' '[:upper:]')
+        feedback=$(echo "${reviewer_output}" | sed -n '/^FEEDBACK:/,$p' | sed '1d' | sed '/^$/d')
+        
+        if [[ "${decision}" != "SHIP" && "${decision}" != "REVISE" ]]; then
+            echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - Invalid decision: '"${decision}"'"}')
+            return
+        fi
+        
+        # Submit review via internal state functions
+        set_review "${session_id}" "${decision}" "${feedback}" "${i}"
+        
+        if [[ "${decision}" == "SHIP" ]]; then
+            local status
+            status=$(get_status "${session_id}" "${max_iterations}")
+            result=$(jq -n --arg msg "SHIPPED after ${i} iteration(s)" --argjson status "${status}" '{success: true, message: $msg, status: $status, shipped: true, iterations: $i}')
+            echo $(json_response "${id}" "${result}")
+            return
+        else
+            # Continue to next iteration
+            continue
+        fi
+    done
+    
+    # Max iterations reached
+    local status
+    status=$(get_status "${session_id}" "${max_iterations}")
+    result=$(jq -n --arg msg "Max iterations (${max_iterations}) reached" --argjson status "${status}" '{success: false, message: $msg, status: $status, shipped: false}')
+    echo $(json_response "${id}" "${result}")
+}
+
 handle_list_methods() {
     local id="${1}"
-    local methods='["ralph_loop_initialize","ralph_loop_get_task","ralph_loop_submit_work","ralph_loop_get_work","ralph_loop_submit_review","ralph_loop_get_feedback","ralph_loop_get_status","ralph_loop_get_config","ralph_loop_reset","ralph_loop_block"]'
+    local methods='["ralph_loop_initialize","ralph_loop_get_task","ralph_loop_submit_work","ralph_loop_get_work","ralph_loop_submit_review","ralph_loop_get_feedback","ralph_loop_get_status","ralph_loop_get_config","ralph_loop_reset","ralph_loop_block","ralph_loop_run"]'
     local result=$(jq -n --argjson methods "${methods}" '{methods: $methods}')
     echo $(json_response "${id}" "${result}")
 }
 
-# Main loop
+# =============================================================================
+# MAIN LOOP
+# =============================================================================
+
+# Send initialization response
 echo '{"jsonrpc":"2.0","id":null,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"ralph-loop-mcp","version":"1.0.0"}}}'
 
 while IFS= read -r line; do
@@ -657,7 +963,6 @@ while IFS= read -r line; do
     
     case "${method}" in
         "initialize")
-            # Return server info
             echo '{"jsonrpc":"2.0","id":'$id',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"ralph-loop-mcp","version":"1.0.0"}}}'
             ;;
         "tools/list")
@@ -696,6 +1001,9 @@ while IFS= read -r line; do
                     ;;
                 "ralph_loop_block")
                     handle_block "${id}" "${tool_args}"
+                    ;;
+                "ralph_loop_run")
+                    handle_run "${id}" "${tool_args}"
                     ;;
                 *)
                     echo $(json_response "${id}" "" '{"code":-32601,"message":"Unknown tool: '"${tool_name}"'"}')
