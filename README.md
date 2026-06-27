@@ -45,13 +45,61 @@ The Ralph Loop implements a two-phase iterative workflow:
 
 ## Features
 
-- **Cross-platform**: Works on Windows (PowerShell/cmd), Linux, and macOS (bash)
-- **MCP Compliant**: Uses official `@modelcontextprotocol/sdk` with JSON-RPC 2.0
+- **Cross-platform Native**: Bash (Linux/macOS) and PowerShell (Windows) implementations — no Node.js runtime required
+- **MCP Compliant**: JSON-RPC 2.0 over stdio
 - **Session-based**: Multiple concurrent Ralph Loop sessions supported
 - **File-based State**: Persistent state stored in `~/.goose/ralph/{sessionId}/`
-- **9 Tools**: Complete workflow control via MCP tools
+- **10 Tools**: Complete workflow control via MCP tools
+- **Cross-Model Review**: Worker/reviewer model configuration with validation
+
+## Implementations
+
+| Platform | File | Requirements |
+|----------|------|--------------|
+| Linux/macOS | `ralph-loop-mcp.sh` | bash, jq |
+| Windows | `ralph-loop-mcp.ps1` | PowerShell 5.1+, jq |
+
+Both implementations provide identical functionality.
 
 ## Installation
+
+### Native Shell (Recommended - No Node.js Required)
+
+**Linux/macOS:**
+```bash
+# Ensure jq is installed
+# Ubuntu/Debian: sudo apt-get install jq
+# macOS: brew install jq
+
+# Make executable
+chmod +x ralph-loop-mcp.sh
+
+# Run directly:
+
+{
+  "mcpServers": {
+    "ralph-loop": {
+      "command": "/path/to/ralph-loop-mcp.sh",
+      "args": []
+    }
+  }
+}
+```
+
+**Windows (PowerShell):**
+```powershell
+# Ensure jq is installed
+# choco install jq
+# or: winget install jqlang.jq In claude_desktop_config.json: {
+  "mcpServers": {    "ralph-loop": {
+      "command": "powershell.exe",
+      "args": ["-File", "C:\\path\\to\\ralph-loop-mcp.ps1"]
+    }
+  }
+}
+```
+
+### Node.js Version (Alternative)
 
 ```bash
 # Clone and install
@@ -61,12 +109,7 @@ npm install
 npm run build
 ```
 
-## Usage with MCP Clients
-
-### Claude Desktop
-
-Add to `claude_desktop_config.json`:
-
+**Claude Desktop (Node.js):**
 ```json
 {
   "mcpServers": {
@@ -78,17 +121,76 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-### Goose
+## Usage with MCP Clients
+
+### Goose (Native Shell)
 
 ```bash
-goose session --mcp ralph-loop --command "node" --args "path/to/dist/index.js"
+# Linux/macOS
+goose session --mcp ralph-loop --command "/path/to/ralph-loop-mcp.sh"
+
+# Windows
+goose session --mcp ralph-loop --command "powershell.exe" --args "-File C:\\path\\to\\ralph-loop-mcp.ps1"
 ```
 
 ### Direct STDIO
 
 ```bash
-node dist/index.js
+# Linux/macOS
+./ralph-loop-mcp.sh
+
+# Windows
+powershell.exe -File ralph-loop-mcp.ps1
 ```
+
+## Running the Ralph Loop (Orchestration Scripts)
+
+The MCP server manages state, but you also need an orchestration script to actually run the worker/reviewer loop with different LLM models. Use these scripts for automated end-to-end execution:
+
+### Linux/macOS (Bash)
+```bash
+# Make executable
+chmod +x ralph-loop.sh
+
+# Run with task from command line
+./ralph-loop.sh "Implement user authentication with JWT tokens"
+
+# Run with task from file
+./ralph-loop.sh /path/to/task.md
+
+# With environment variables (skips prompts)
+RALPH_WORKER_MODEL=claude-3-5-sonnet \
+RALPH_WORKER_PROVIDER=anthropic \
+RALPH_REVIEWER_MODEL=gpt-4o \
+RALPH_REVIEWER_PROVIDER=openai \
+RALPH_MAX_ITERATIONS=5 \
+./ralph-loop.sh "Your task here"
+```
+
+### Windows (PowerShell)
+```powershell
+# Run with task from command line
+.\ralph-loop.ps1 "Implement user authentication with JWT tokens"
+
+# Run with task from file
+.\ralph-loop.ps1 C:\path\to\task.md
+
+# With environment variables (skips prompts)
+$env:RALPH_WORKER_MODEL = "claude-3-5-sonnet"
+$env:RALPH_WORKER_PROVIDER = "anthropic"
+$env:RALPH_REVIEWER_MODEL = "gpt-4o"
+$env:RALPH_REVIEWER_PROVIDER = "openai"
+$env:RALPH_MAX_ITERATIONS = 5
+.\ralph-loop.ps1 "Your task here"
+```
+
+The orchestration script will:
+1. Initialize a session with the MCP server
+2. Run the WORK phase using the worker model
+3. Run the REVIEW phase using the reviewer model
+4. Loop until SHIP or max iterations reached
+
+**Requirements:** jq + LLM CLI (claude, openai, gemini, or goose)
 
 ## Available Tools
 
@@ -101,6 +203,7 @@ node dist/index.js
 | `ralph_loop_submit_review` | Submit review decision (SHIP/REVISE) with feedback |
 | `ralph_loop_get_feedback` | Get reviewer feedback for next iteration |
 | `ralph_loop_get_status` | Get current session status (iteration, phase, state) |
+| `ralph_loop_get_config` | Get worker/reviewer model configuration |
 | `ralph_loop_reset` | Reset/clear a session |
 | `ralph_loop_block` | Block current iteration with reason |
 
@@ -116,7 +219,12 @@ node dist/index.js
     "arguments": {
       "sessionId": "my-feature",
       "task": "Implement user authentication with JWT tokens",
-      "maxIterations": 5
+      "maxIterations": 5,
+      "workerModel": "claude-3-5-sonnet",
+      "workerProvider": "anthropic",
+      "reviewerModel": "gpt-4o",
+      "reviewerProvider": "openai",
+      "crossModelReviewEnforced": true
     }
   }
 }
@@ -204,20 +312,33 @@ node dist/index.js
 }
 ```
 
+### 8. Get Configuration
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "ralph_loop_get_config",
+    "arguments": { "sessionId": "my-feature" }
+  }
+}
+```
+
 ## State Management
 
 State is stored in `~/.goose/ralph/{sessionId}/`:
 
 ```
 ~/.goose/ralph/my-feature/
-├── task.json           # Original task
-├── work.json           # Current work submission
-├── review.json         # Current review
-├── work-complete.txt   # Worker completion flag
-├── review-result.txt   # SHIP/REVISE decision
-├── review-feedback.txt # Reviewer feedback
-├── RALPH-BLOCKED.md    # Blocking reason (if blocked)
-└── iteration.txt       # Current iteration number
+├── config.json           # Worker/reviewer model configuration
+├── task.json             # Original task
+├── work.json             # Current work submission
+├── review.json           # Current review
+├── work-complete.txt     # Worker completion flag
+├── review-result.txt     # SHIP/REVISE decision
+├── review-feedback.txt   # Reviewer feedback
+├── RALPH-BLOCKED.md      # Blocking reason (if blocked)
+└── iteration.txt         # Current iteration number
 ```
 
 ## Cross-Model Review Setup
@@ -233,6 +354,8 @@ For true cross-model review, use different models for worker and reviewer:
 - Reviews worker's output
 - Provides SHIP/REVISE decision
 - Gives specific feedback for revision
+
+The `crossModelReviewEnforced` option (default: true) validates that worker and reviewer use different models/providers, warning if they are the same.
 
 ## Blocking
 
@@ -258,9 +381,14 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 ### ralph_loop_initialize
 ```typescript
 {
-  sessionId?: string;      // default: "default"
-  task: string;            // required
-  maxIterations?: number;  // default: 10, max: 50
+  sessionId?: string;              // default: "default"
+  task: string;                    // required
+  maxIterations?: number;          // default: 10, max: 50
+  workerModel?: string;            // e.g., "claude-3-5-sonnet"
+  workerProvider?: string;         // e.g., "anthropic"
+  reviewerModel?: string;          // e.g., "gpt-4o"
+  reviewerProvider?: string;       // e.g., "openai"
+  crossModelReviewEnforced?: boolean; // default: true
 }
 ```
 
@@ -312,6 +440,13 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 }
 ```
 
+### ralph_loop_get_config
+```typescript
+{
+  sessionId?: string;  // default: "default"
+}
+```
+
 ### ralph_loop_reset
 ```typescript
 {
@@ -327,7 +462,7 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 }
 ```
 
-## Development
+## Development (Node.js Version)
 
 ```bash
 # Install dependencies
@@ -342,6 +477,15 @@ npm start
 # Development (build + run)
 npm run dev
 ```
+
+## Requirements
+
+- **jq** - JSON processor (required for both Bash and PowerShell)
+  - Linux: `apt-get install jq` / `yum install jq` / `apk add jq`
+  - macOS: `brew install jq`
+  - Windows: `choco install jq` / `winget install jqlang.jq` / `scoop install jq`
+
+- **Bash** (Linux/macOS) or **PowerShell 5.1+** (Windows)
 
 ## License
 
