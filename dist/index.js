@@ -49,6 +49,33 @@ class RalphState {
             rmSync(path);
         }
     }
+    // Config management
+    setConfig(config) {
+        const configData = {
+            ...config,
+            configuredAt: new Date().toISOString(),
+        };
+        this.writeJson("config.json", configData);
+    }
+    getConfig() {
+        return this.readJson("config.json");
+    }
+    // Validate cross-model review configuration
+    validateCrossModelReview() {
+        const config = this.getConfig();
+        if (!config) {
+            return { valid: true }; // Not configured yet
+        }
+        if (config.crossModelReviewEnforced &&
+            config.workerModel === config.reviewerModel &&
+            config.workerProvider === config.reviewerProvider) {
+            return {
+                valid: false,
+                warning: "Worker and reviewer are the same model/provider. Cross-model review requires different models.",
+            };
+        }
+        return { valid: true };
+    }
     // Task management
     setTask(task) {
         const taskData = {
@@ -106,6 +133,8 @@ class RalphState {
         const reviewResult = this.getReviewResult();
         const feedback = this.getFeedback();
         const blocked = existsSync(getStateFile(this.sessionId, "RALPH-BLOCKED.md"));
+        const config = this.getConfig();
+        const crossModelValidation = this.validateCrossModelReview();
         let phase = "WORK";
         let status = "running";
         let currentIteration = 1;
@@ -148,6 +177,13 @@ class RalphState {
             lastFeedback: feedback,
             createdAt: task?.createdAt || new Date().toISOString(),
             updatedAt: new Date().toISOString(),
+            workerModel: config?.workerModel,
+            workerProvider: config?.workerProvider,
+            reviewerModel: config?.reviewerModel,
+            reviewerProvider: config?.reviewerProvider,
+            crossModelReviewEnforced: config?.crossModelReviewEnforced,
+            crossModelReviewValid: crossModelValidation.valid,
+            crossModelReviewWarning: crossModelValidation.warning,
         };
     }
     // Check if work is complete (for worker phase)
@@ -201,6 +237,27 @@ const TOOLS = [
                     default: 10,
                     minimum: 1,
                     maximum: 50,
+                },
+                workerModel: {
+                    type: "string",
+                    description: "Model for the worker phase (e.g., 'claude-3-5-sonnet', 'gpt-4o')",
+                },
+                workerProvider: {
+                    type: "string",
+                    description: "Provider for the worker phase (e.g., 'anthropic', 'openai')",
+                },
+                reviewerModel: {
+                    type: "string",
+                    description: "Model for the reviewer phase (should be different from worker for cross-model review)",
+                },
+                reviewerProvider: {
+                    type: "string",
+                    description: "Provider for the reviewer phase (e.g., 'anthropic', 'openai', 'google')",
+                },
+                crossModelReviewEnforced: {
+                    type: "boolean",
+                    description: "Enforce cross-model review (worker and reviewer must be different)",
+                    default: true,
                 },
             },
             required: ["task"],
@@ -324,6 +381,21 @@ const TOOLS = [
         },
     },
     {
+        name: "ralph_loop_get_config",
+        description: "Get the worker/reviewer model configuration for the session.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                sessionId: {
+                    type: "string",
+                    description: "Session identifier",
+                    default: "default",
+                },
+            },
+            required: [],
+        },
+    },
+    {
         name: "ralph_loop_reset",
         description: "Reset/clear a Ralph Loop session, removing all state files.",
         inputSchema: {
@@ -381,10 +453,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             case "ralph_loop_initialize": {
                 const task = args?.task;
                 const maxIterations = args?.maxIterations || 10;
+                const workerModel = args?.workerModel;
+                const workerProvider = args?.workerProvider;
+                const reviewerModel = args?.reviewerModel;
+                const reviewerProvider = args?.reviewerProvider;
+                const crossModelReviewEnforced = args?.crossModelReviewEnforced ?? true;
                 if (!task) {
                     throw new Error("Task is required");
                 }
                 state.setTask(task);
+                // Save configuration
+                state.setConfig({
+                    workerModel,
+                    workerProvider,
+                    reviewerModel,
+                    reviewerProvider,
+                    maxIterations,
+                    crossModelReviewEnforced,
+                });
+                // Validate cross-model review
+                const validation = state.validateCrossModelReview();
                 const status = state.getStatus(maxIterations);
                 return {
                     content: [
@@ -394,6 +482,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                                 success: true,
                                 message: `Ralph Loop initialized for session "${sessionId}"`,
                                 status,
+                                crossModelReview: {
+                                    enforced: crossModelReviewEnforced,
+                                    valid: validation.valid,
+                                    warning: validation.warning,
+                                },
                             }, null, 2),
                         },
                     ],
@@ -566,6 +659,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                             text: JSON.stringify({
                                 success: true,
                                 ...status,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            }
+            case "ralph_loop_get_config": {
+                const config = state.getConfig();
+                if (!config) {
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    success: false,
+                                    error: "No configuration found. Initialize the session first with ralph_loop_initialize.",
+                                }, null, 2),
+                            },
+                        ],
+                    };
+                }
+                const validation = state.validateCrossModelReview();
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                config: {
+                                    workerModel: config.workerModel,
+                                    workerProvider: config.workerProvider,
+                                    reviewerModel: config.reviewerModel,
+                                    reviewerProvider: config.reviewerProvider,
+                                    maxIterations: config.maxIterations,
+                                    crossModelReviewEnforced: config.crossModelReviewEnforced,
+                                    configuredAt: config.configuredAt,
+                                },
+                                crossModelReview: {
+                                    enforced: config.crossModelReviewEnforced,
+                                    valid: validation.valid,
+                                    warning: validation.warning,
+                                },
                             }, null, 2),
                         },
                     ],
