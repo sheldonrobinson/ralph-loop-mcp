@@ -1,4 +1,4 @@
-<#>
+﻿<#>
 .SYNOPSIS
     ralph-loop-runner - PowerShell Implementation (Unified: MCP Server + CLI Orchestration)
     Cross-platform implementation of the Ralph Loop iterative development technique
@@ -109,7 +109,8 @@ function Call-WorkerLlm {
     switch ($WorkerProvider) { 
         'anthropic' { return $prompt | claude --model $WorkerModel --print 2>$null } 
         'openai'    { return $prompt | openai chat --model $WorkerModel --no-stream 2>$null } 
-        'google'    { return $prompt | gemini --model $WorkerModel --format=text 2>$null } 
+        'google'    { return $prompt | gemini --model $WorkerModel --format=text 2>$null }
+        'copilot' { return $prompt | copilot -p --allow-all-tools 2>$null } 
         'goose'     { 
             if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
                 $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --recipe $WorkGuidelines --session $SessionId --task $Task --feedback $Feedback 2>$null 
@@ -117,7 +118,6 @@ function Call-WorkerLlm {
                 $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --session $SessionId --task $Task --feedback $Feedback 2>$null 
             } 
         } 
-        'copilot' { return $prompt | gh copilot suggest 2>$null }
         default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
     } 
 }
@@ -129,6 +129,7 @@ function Call-ReviewerLlm {
         'anthropic' { return $prompt | claude --model $ReviewerModel --print 2>$null } 
         'openai'    { return $prompt | openai chat --model $ReviewerModel --no-stream 2>$null } 
         'google'    { return $prompt | gemini --model $ReviewerModel --format=text 2>$null } 
+        'copilot' { return $prompt | copilot -p --allow-all-tools 2>$null } 
         'goose'     { 
             if ($ReviewGuidelines -and (Test-Path $ReviewGuidelines)) { 
                 $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --recipe $ReviewGuidelines --session $SessionId --work $Work --summary $Summary 2>$null 
@@ -136,7 +137,6 @@ function Call-ReviewerLlm {
                 $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --session $SessionId --work $Work --summary $Summary 2>$null 
             } 
         } 
-        'copilot' { return $prompt | gh copilot suggest 2>$null }
         default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
     } 
 }
@@ -209,53 +209,53 @@ function Run-Cli {
 
     for ($i = 1; $i -le $maxIter; $i++) {
         $iteration = $i
-        Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
+        Write-Host "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
         Write-Host "  Iteration $iteration / $maxIterations"
-        Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
+        Write-Host "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
 
-        Write-Host "▶ WORK PHASE"
+        Write-Host "â–¶ WORK PHASE"
         Write-Host "Worker: $workerModel ($workerProvider) via $workerAgent"
 
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines
-        if (-not $workerOutput) { Write-Host "✗ WORK PHASE FAILED - No output from worker" -ForegroundColor Red; exit 1 }
+        if (-not $workerOutput) { Write-Host "âœ— WORK PHASE FAILED - No output from worker" -ForegroundColor Red; exit 1 }
 
         $parsed = Parse-WorkerOutput -Output $workerOutput
         $work = $parsed.work; $summary = $parsed.summary
-        if (-not $work -or -not $summary) { Write-Host "✗ WORK PHASE FAILED - Could not parse output" -ForegroundColor Red; exit 1 }
+        if (-not $work -or -not $summary) { Write-Host "âœ— WORK PHASE FAILED - Could not parse output" -ForegroundColor Red; exit 1 }
 
         Set-Work -SessionId $sessionId -Work $work -Summary $summary -Iteration $iteration
         Write-Host "Work submitted. Summary: $summary"
         Write-Host ""
 
-        Write-Host "▶ REVIEW PHASE"
+        Write-Host "â–¶ REVIEW PHASE"
         Write-Host "Reviewer: $reviewerModel ($reviewerProvider) via $reviewerAgent"
 
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines
-        if (-not $reviewerOutput) { Write-Host "✗ REVIEW PHASE FAILED - No output from reviewer" -ForegroundColor Red; exit 1 }
+        if (-not $reviewerOutput) { Write-Host "âœ— REVIEW PHASE FAILED - No output from reviewer" -ForegroundColor Red; exit 1 }
 
         $parsed = Parse-ReviewerOutput -Output $reviewerOutput
         $decision = $parsed.decision; $feedback = $parsed.feedback
-        if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { Write-Host "✗ REVIEW PHASE FAILED - Invalid decision: $decision" -ForegroundColor Red; exit 1 }
+        if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { Write-Host "âœ— REVIEW PHASE FAILED - Invalid decision: $decision" -ForegroundColor Red; exit 1 }
 
         Set-Review -SessionId $sessionId -Decision $decision -Feedback $feedback -Iteration $iteration
 
         if ($decision -eq 'SHIP') {
             Write-Host ""
-            Write-Host "══════════════════════════════════════════════════════════════════════════════════════════"
-            Write-Host "  ✓ SHIPPED after $iteration iteration(s)" -ForegroundColor Green
-            Write-Host "═══════════════════════════════════════════════════════════════════════════════════════════"
+            Write-Host "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+            Write-Host "  âœ“ SHIPPED after $iteration iteration(s)" -ForegroundColor Green
+            Write-Host "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
             Write-Host "Session: $sessionId"
             Write-Host "Complete: $(Get-Date)"
             exit 0
         } else {
             Write-Host ""
-            Write-Host "↻ REVISE - Feedback for next iteration:" -ForegroundColor Yellow
+            Write-Host "â†» REVISE - Feedback for next iteration:" -ForegroundColor Yellow
             Write-Host $feedback
             Write-Host ""
         }
     }
 
-    Write-Host "✗ Max iterations ($maxIterations) reached" -ForegroundColor Red
+    Write-Host "âœ— Max iterations ($maxIterations) reached" -ForegroundColor Red
     exit 1
 }
 

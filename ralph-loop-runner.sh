@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # ralph-loop-runner - Bash Implementation (Unified: MCP Server + CLI Orchestration)
 # Cross-platform implementation of the Ralph Loop iterative development technique
 # For Linux/macOS
@@ -466,6 +466,10 @@ SUMMARY:
         google)
             echo "${prompt}" | gemini --model "${worker_model}" --format=text 2>/dev/null
             ;;
+        copilot)
+            # GitHub Copilot CLI
+            copilot -p --allow-all-tools "${prompt}" 2>/dev/null
+            ;;
         goose)
             if [[ -n "${work_guidelines}" && -f "${work_guidelines}" ]]; then
                 GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
@@ -474,10 +478,6 @@ SUMMARY:
                 GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
                 goose run --session "${session_id}" --task "${task}" --feedback "${feedback}" 2>/dev/null
             fi
-            ;;
-        copilot)
-            # GitHub Copilot CLI
-            gh copilot suggest "${prompt}" 2>/dev/null
             ;;
         *)
             echo "Error: Unknown provider ${worker_provider}" >&2
@@ -523,6 +523,10 @@ FEEDBACK: [your feedback, or empty if SHIP]"
         google)
             echo "${prompt}" | gemini --model "${reviewer_model}" --format=text 2>/dev/null
             ;;
+        copilot)
+            # GitHub Copilot CLI
+            copilot -p --allow-all-tools "${prompt}" 2>/dev/null
+            ;;
         goose)
             if [[ -n "${review_guidelines}" && -f "${review_guidelines}" ]]; then
                 GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
@@ -531,10 +535,6 @@ FEEDBACK: [your feedback, or empty if SHIP]"
                 GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
                 goose run --session "${session_id}" --work "${work}" --summary "${summary}" 2>/dev/null
             fi
-            ;;
-        copilot)
-            # GitHub Copilot CLI
-            gh copilot suggest "${prompt}" 2>/dev/null
             ;;
         *)
             echo "Error: Unknown provider ${reviewer_provider}" >&2
@@ -730,19 +730,19 @@ run_cli() {
     
     for ((i=1; i<=max_iter; i++)); do
         iteration=$i
-        echo "═════════════════════════════════════════════════════════════════════════════════"
+        echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
         echo "  Iteration ${iteration} / ${max_iterations}"
-        echo "════════════════════════════════════════════════════════════════════════════════"
+        echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
         
         # WORK PHASE
-        echo "▶ WORK PHASE"
+        echo "â–¶ WORK PHASE"
         echo "Worker: ${worker_model} (${worker_provider}) via ${worker_agent}"
         
         local worker_output
         worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}")
         
         if [[ -z "${worker_output}" ]]; then
-            echo "✗ WORK PHASE FAILED - No output from worker" >&2
+            echo "âœ— WORK PHASE FAILED - No output from worker" >&2
             exit 1
         fi
         
@@ -752,7 +752,7 @@ run_cli() {
         summary=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ -z "${work}" || -z "${summary}" ]]; then
-            echo "✗ WORK PHASE FAILED - Could not parse output" >&2
+            echo "âœ— WORK PHASE FAILED - Could not parse output" >&2
             exit 1
         fi
         
@@ -761,14 +761,14 @@ run_cli() {
         echo ""
         
         # REVIEW PHASE
-        echo "▶ REVIEW PHASE"
+        echo "â–¶ REVIEW PHASE"
         echo "Reviewer: ${reviewer_model} (${reviewer_provider}) via ${reviewer_agent}"
         
         local reviewer_output
         reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}")
         
         if [[ -z "${reviewer_output}" ]]; then
-            echo "✗ REVIEW PHASE FAILED - No output from reviewer" >&2
+            echo "âœ— REVIEW PHASE FAILED - No output from reviewer" >&2
             exit 1
         fi
         
@@ -777,7 +777,7 @@ run_cli() {
         feedback=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ "${decision}" != "SHIP" && "${decision}" != "REVISE" ]]; then
-            echo "✗ REVIEW PHASE FAILED - Invalid decision: ${decision}" >&2
+            echo "âœ— REVIEW PHASE FAILED - Invalid decision: ${decision}" >&2
             exit 1
         fi
         
@@ -785,21 +785,21 @@ run_cli() {
         
         if [[ "${decision}" == "SHIP" ]]; then
             echo ""
-            echo "════════════════════════════════════════════════════════════════════════════════"
-            echo "  ✓ SHIPPED after ${iteration} iteration(s)"
-            echo "════════════════════════════════════════════════════════════════════════════════"
+            echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+            echo "  âœ“ SHIPPED after ${iteration} iteration(s)"
+            echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
             echo "Session: ${session_id}"
             echo "Complete: $(date)"
             exit 0
         else
             echo ""
-            echo "↻ REVISE - Feedback for next iteration:"
+            echo "â†» REVISE - Feedback for next iteration:"
             echo "${feedback}"
             echo ""
         fi
     done
     
-    echo "✗ Max iterations (${max_iterations}) reached" >&2
+    echo "âœ— Max iterations (${max_iterations}) reached" >&2
     exit 1
 }
 
