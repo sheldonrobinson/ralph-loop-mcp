@@ -113,9 +113,9 @@ function Call-WorkerLlm {
         'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
         'goose'     { 
             if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
-                $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --recipe $WorkGuidelines --session-id $SessionId --text $Task --feedback $Feedback 2>$null 
+                $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --recipe $WorkGuidelines --session-id $SessionId --text $prompt 2>$null 
             } else { 
-                $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --session-id $SessionId --text $Task --feedback $Feedback 2>$null 
+                $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --session-id $SessionId --text $prompt 2>$null 
             } 
         } 
         default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
@@ -132,9 +132,9 @@ function Call-ReviewerLlm {
         'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
         'goose'     { 
             if ($ReviewGuidelines -and (Test-Path $ReviewGuidelines)) { 
-                $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --recipe $ReviewGuidelines --session-id $SessionId --work $Work --summary $Summary 2>$null 
+                $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --recipe $ReviewGuidelines --session-id $SessionId --text $prompt 2>$null 
             } else { 
-                $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --session-id $SessionId --work $Work --summary $Summary 2>$null 
+                $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --session-id $SessionId --text $prompt 2>$null 
             } 
         } 
         default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
