@@ -106,18 +106,29 @@ function Call-WorkerLlm {
     $prompt = "You are the WORKER in a Ralph Loop iteration $Iteration.`n`nTask: $Task`n"
     if ($Feedback) { $prompt += "Previous feedback from reviewer: $Feedback`nPlease revise your work based on this feedback.`n" }
     $prompt += "Provide your complete work output and a brief summary.`nOutput format:`nWORK:`n[your complete work here]`n`nSUMMARY:`n[brief summary of what you did]`n"
-    switch ($WorkerProvider) { 
+    switch ($WorkerAgent) { 
         'anthropic' { return $prompt | claude --model $WorkerModel --print 2>$null } 
         'openai'    { return $prompt | openai chat --model $WorkerModel --no-stream 2>$null } 
         'google'    { return $prompt | gemini --model $WorkerModel --format=text 2>$null }
         'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
-        'goose'     { 
+        'goose' { 
+            $gooseParams = @("task=$Task")
+            if ($Feedback) { $gooseParams += "feedback=$Feedback" }
+            $gooseArgs = @('run')
             if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
-                $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --recipe $WorkGuidelines --session-id $SessionId --text $prompt 2>$null 
+                $gooseArgs += '--recipe', $WorkGuidelines
+            }
+            $gooseArgs += '--params', ($gooseParams -join ' ')
+            if ($SessionId) { 
+                $gooseArgs += '--session-id', $SessionId, '--resume' 
             } else { 
-                $env:GOOSE_MODEL = $WorkerModel; $env:GOOSE_PROVIDER = $WorkerProvider; return goose run --session-id $SessionId --text $prompt 2>$null 
+                $gooseArgs += '--no-session' 
             } 
-        } 
+            $gooseArgs += '--text', $prompt
+            $env:GOOSE_MODEL = $WorkerModel
+            $env:GOOSE_PROVIDER = $WorkerProvider
+            return goose $gooseArgs 2>$null 
+        }
         default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
     } 
 }
@@ -125,18 +136,30 @@ function Call-WorkerLlm {
 function Call-ReviewerLlm { 
     param([string]$Task, [string]$Work, [string]$Summary, [int]$Iteration, [string]$SessionId, [string]$ReviewerModel, [string]$ReviewerProvider, [string]$ReviewerAgent, [string]$ReviewGuidelines)
     $prompt = "You are the REVIEWER in a Ralph Loop iteration $Iteration.`n`nOriginal Task: $Task`n`nWorker's Work:`n$Work`n`nWorker's Summary: $Summary`n`nReview this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).`nIf REVISE, provide specific, actionable feedback for the worker.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [your feedback, or empty if SHIP]`n"
-    switch ($ReviewerProvider) { 
+    switch ($ReviewerAgent) { 
         'anthropic' { return $prompt | claude --model $ReviewerModel --print 2>$null } 
         'openai'    { return $prompt | openai chat --model $ReviewerModel --no-stream 2>$null } 
         'google'    { return $prompt | gemini --model $ReviewerModel --format=text 2>$null } 
         'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
-        'goose'     { 
-            if ($ReviewGuidelines -and (Test-Path $ReviewGuidelines)) { 
-                $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --recipe $ReviewGuidelines --session-id $SessionId --text $prompt 2>$null 
+        'goose' { 
+            $gooseParams = @("task=$Task")
+            if ($Work) { $gooseParams += "Work=$Work" }
+            if ($Summary) { $gooseParams += "Summary=$Summary" }
+            $gooseArgs = @('run')
+            if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
+                $gooseArgs += '--recipe', $WorkGuidelines
+            }
+            $gooseArgs += '--params', ($gooseParams -join ' ')
+            if ($SessionId) { 
+                $gooseArgs += '--session-id', $SessionId, '--resume' 
             } else { 
-                $env:GOOSE_MODEL = $ReviewerModel; $env:GOOSE_PROVIDER = $ReviewerProvider; return goose run --session-id $SessionId --text $prompt 2>$null 
+                $gooseArgs += '--no-session' 
             } 
-        } 
+            $gooseArgs += '--text', $prompt
+            $env:GOOSE_MODEL = $ReviewerModel
+            $env:GOOSE_PROVIDER = $ReviewerProvider
+            return goose $gooseArgs 2>$null 
+        }
         default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
     } 
 }

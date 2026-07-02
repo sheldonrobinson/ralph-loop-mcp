@@ -473,10 +473,10 @@ SUMMARY:
         goose)
             if [[ -n "${work_guidelines}" && -f "${work_guidelines}" ]]; then
                 GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
-                goose run --recipe "${work_guidelines}" --session "${session_id}" --task "${task}" --feedback "${feedback}" 2>/dev/null
+                goose run --recipe "${work_guidelines}" --session-id "${session_id}" --text "${prompt}" 2>/dev/null
             else
                 GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
-                goose run --session "${session_id}" --task "${task}" --feedback "${feedback}" 2>/dev/null
+                goose run --session-id "${session_id}" --text "${prompt}" 2>/dev/null
             fi
             ;;
         *)
@@ -530,10 +530,10 @@ FEEDBACK: [your feedback, or empty if SHIP]"
         goose)
             if [[ -n "${review_guidelines}" && -f "${review_guidelines}" ]]; then
                 GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
-                goose run --recipe "${review_guidelines}" --session "${session_id}" --work "${work}" --summary "${summary}" 2>/dev/null
+                goose run --recipe "${review_guidelines}" --session-id "${session_id}" --text "${prompt}" 2>/dev/null
             else
                 GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
-                goose run --session "${session_id}" --work "${work}" --summary "${summary}" 2>/dev/null
+                goose run --session-id "${session_id}" --text "${prompt}" 2>/dev/null
             fi
             ;;
         *)
