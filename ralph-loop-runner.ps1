@@ -105,7 +105,7 @@ function Block-Iteration { param([string]$SessionId, [string]$Reason); Ensure-St
 # ORCHESTRATION HELPERS (CLI mode)
 # =============================================================================
 function Call-WorkerLlm { 
-    param([string]$Task, [string]$Feedback, [int]$Iteration, [string]$SessionId, [string]$WorkerModel, [string]$WorkerProvider, [string]$WorkerAgent, [string]$WorkGuidelines)
+    param([string]$Task, [string]$Feedback, [int]$Iteration, [string]$SessionId, [string]$WorkerModel, [string]$WorkerProvider, [string]$WorkerAgent, [string]$WorkGuidelines, [bool]$IsExisting = $false)
     $prompt = "You are the WORKER in a Ralph Loop iteration $Iteration.`n`nTask: $Task`n"
     if ($Feedback) { $prompt += "Previous feedback from reviewer: $Feedback`nPlease revise your work based on this feedback.`n" }
     $prompt += "Provide your complete work output and a brief summary.`nOutput format:`nWORK:`n[your complete work here]`n`nSUMMARY:`n[brief summary of what you did]`n"
@@ -123,7 +123,7 @@ function Call-WorkerLlm {
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) { 
-                if ($Iteration -gt 1) { $gooseArgs += '--resume' }
+                if ($IsExisting) { $gooseArgs += '--resume' }
                 $gooseArgs += '--name', $SessionId
             } else { 
                 $gooseArgs += '--no-session' 
@@ -138,7 +138,7 @@ function Call-WorkerLlm {
 }
 
 function Call-ReviewerLlm { 
-    param([string]$Task, [string]$Work, [string]$Summary, [int]$Iteration, [string]$SessionId, [string]$ReviewerModel, [string]$ReviewerProvider, [string]$ReviewerAgent, [string]$ReviewGuidelines)
+    param([string]$Task, [string]$Work, [string]$Summary, [int]$Iteration, [string]$SessionId, [string]$ReviewerModel, [string]$ReviewerProvider, [string]$ReviewerAgent, [string]$ReviewGuidelines, [bool]$IsExisting = $false)
     $prompt = "You are the REVIEWER in a Ralph Loop iteration $Iteration.`n`nOriginal Task: $Task`n`nWorker's Work:`n$Work`n`nWorker's Summary: $Summary`n`nReview this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).`nIf REVISE, provide specific, actionable feedback for the worker.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [your feedback, or empty if SHIP]`n"
     switch ($ReviewerAgent) { 
         'anthropic' { return $prompt | claude --model $ReviewerModel --print 2>$null } 
@@ -155,7 +155,7 @@ function Call-ReviewerLlm {
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) {
-                if ($Iteration -gt 1) { $gooseArgs += '--resume' }
+                if ($IsExisting) { $gooseArgs += '--resume' }
                 $gooseArgs += '--name', $SessionId
             } else { 
                 $gooseArgs += '--no-session' 
@@ -337,7 +337,7 @@ function Run-Cli {
         Write-Host ">> WORK PHASE"
         Write-Host "Worker: $workerModel ($workerProvider) via $workerAgent"
 
-        $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines
+        $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
         if (-not $workerOutput) { Write-Host "XX WORK PHASE FAILED - No output from worker" -ForegroundColor Red; exit 1 }
 
         # Save worker output to file for Monitor LLM fallback
@@ -355,7 +355,7 @@ function Run-Cli {
         Write-Host ">> REVIEW PHASE"
         Write-Host "Reviewer: $reviewerModel ($reviewerProvider) via $reviewerAgent"
 
-        $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines
+        $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
         if (-not $reviewerOutput) { Write-Host "XX REVIEW PHASE FAILED - No output from reviewer" -ForegroundColor Red; exit 1 }
 
         # Save reviewer output to file for Monitor LLM fallback
@@ -432,7 +432,7 @@ function Handle-Run { param($Id, $Params)
         if ($feedback) { $workerPrompt += "Previous feedback from reviewer: $feedback`nPlease revise your work based on this feedback.`n" }
         $workerPrompt += "Provide your complete work output and a brief summary.`nOutput format:`nWORK:`n[your complete work here]`n`nSUMMARY:`n[brief summary of what you did]`n"
 
-        $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines
+        $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting ($i -gt 1)
         if (-not $workerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - No output from worker' } }
 
         # Save worker output to file for Monitor LLM fallback
@@ -447,7 +447,7 @@ function Handle-Run { param($Id, $Params)
 
         $reviewerPrompt = "You are the REVIEWER in a Ralph Loop iteration $i.`n`nOriginal Task: $task`n`nWorker's Work:`n$work`n`nWorker's Summary: $summary`n`nReview this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).`nIf REVISE, provide specific, actionable feedback for the worker.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [your feedback, or empty if SHIP]`n"
 
-        $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines
+        $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting ($i -gt 1)
         if (-not $reviewerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - No output from reviewer' } }
 
         # Save reviewer output to file for Monitor LLM fallback
