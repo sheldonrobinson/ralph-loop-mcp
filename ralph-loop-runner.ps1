@@ -123,6 +123,7 @@ function Call-WorkerLlm {
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) { 
+                if ($Iteration -gt 1) { $gooseArgs += '--resume' }
                 $gooseArgs += '--name', $SessionId
             } else { 
                 $gooseArgs += '--no-session' 
@@ -130,7 +131,7 @@ function Call-WorkerLlm {
             $gooseArgs += '--text', $prompt
             $env:GOOSE_MODEL = $WorkerModel
             $env:GOOSE_PROVIDER = $WorkerProvider
-            return goose $gooseArgs 1>work.out 2>$null 
+            goose $gooseArgs 1>work.out 2>$null; if (Test-Path work.out) { return Get-Content work.out -Raw } else { return $null }
         }
         default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
     } 
@@ -153,15 +154,16 @@ function Call-ReviewerLlm {
                 $gooseArgs += '--recipe', $WorkGuidelines
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
-            if ($SessionId) { 
-                $gooseArgs += '--name', $SessionId 
+            if ($SessionId) {
+                if ($Iteration -gt 1) { $gooseArgs += '--resume' }
+                $gooseArgs += '--name', $SessionId
             } else { 
                 $gooseArgs += '--no-session' 
             } 
             $gooseArgs += '--text', $prompt
             $env:GOOSE_MODEL = $ReviewerModel
             $env:GOOSE_PROVIDER = $ReviewerProvider
-            return goose $gooseArgs 1>reviewer.out 2>$null 
+            goose $gooseArgs 1>review.out 2>$null; if (Test-Path review.out) { return Get-Content review.out -Raw } else { return $null }
         }
         default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
     } 
@@ -183,14 +185,21 @@ function Call-MonitorLlm {
         'goose'     {
                       $env:GOOSE_MODEL = $MonitorModel
                       $env:GOOSE_PROVIDER = $MonitorProvider
-                      return goose run --text $Prompt 1>std.out 2>$null
+                      # Write prompt to temp file and pipe via stdin to avoid command-line length limits
+                      $tempFile = Join-Path $env:TEMP "ralph-monitor-$([System.IO.Path]::GetRandomFileName()).txt"
+                      try {
+                          $Prompt | Out-File -FilePath $tempFile -Encoding UTF8
+                          return goose run -i $tempFile 2>$null
+                      } finally {
+                          if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+                      }
                     }
         default     { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
     }
 }
 
 function Parse-WorkerOutput {
-    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '')
+    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '', [string]$OutputFile = '')
     $work = ''; $summary = ''
     $mWork = [regex]::Match($Output, '(?s)WORK:(.*?)SUMMARY:')
     if ($mWork.Success) { $work = $mWork.Groups[1].Value.Trim() }
@@ -199,7 +208,12 @@ function Parse-WorkerOutput {
     # Regex failed -- try Monitor LLM fallback
     if (-not $work -or -not $summary) {
         Write-Host "  Regex parsing failed for worker output, consulting Monitor LLM..." -ForegroundColor Yellow
-        $monitorPrompt = "Extract the WORK and SUMMARY sections from the following raw agent output.`n`nIf the agent created or modified files, include the file paths and key content in WORK.`nSummarize what was accomplished in SUMMARY.`n`nOutput format:`nWORK:`n[extracted work content]`n`nSUMMARY:`n[one-line summary]`n`n---`n$Output"
+        # For goose agent, reference the output file to avoid command-line length issues
+        if ($MonitorAgent -eq 'goose' -and $OutputFile -and (Test-Path $OutputFile)) {
+            $monitorPrompt = "Read the file at '$OutputFile' then extract the WORK and SUMMARY sections from its content.`n`nIf the agent created or modified files, include the file paths and key content in WORK.`nSummarize what was accomplished in SUMMARY.`n`nOutput format:`nWORK:`n[extracted work content]`n`nSUMMARY:`n[one-line summary]"
+        } else {
+            $monitorPrompt = "Extract the WORK and SUMMARY sections from the following raw agent output.`n`nIf the agent created or modified files, include the file paths and key content in WORK.`nSummarize what was accomplished in SUMMARY.`n`nOutput format:`nWORK:`n[extracted work content]`n`nSUMMARY:`n[one-line summary]`n`n---`n$Output"
+        }
         $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
         if ($monitorResponse) {
             $mWork2 = [regex]::Match($monitorResponse, '(?s)WORK:(.*?)SUMMARY:')
@@ -214,7 +228,7 @@ function Parse-WorkerOutput {
 }
 
 function Parse-ReviewerOutput {
-    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '')
+    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '', [string]$OutputFile = '')
     $decision = ''; $feedback = ''
     $mDecision = [regex]::Match($Output, '(?i)DECISION:\s*(SHIP|REVISE)')
     if ($mDecision.Success) { $decision = $mDecision.Groups[1].Value.ToUpper() }
@@ -223,7 +237,12 @@ function Parse-ReviewerOutput {
     # Regex failed -- try Monitor LLM fallback
     if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') {
         Write-Host "  Regex parsing failed for reviewer output, consulting Monitor LLM..." -ForegroundColor Yellow
-        $monitorPrompt = "Extract the DECISION (SHIP or REVISE) and FEEDBACK from the following raw agent output.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [the review feedback]`n`n---`n$Output"
+        # For goose agent, reference the output file to avoid command-line length issues
+        if ($MonitorAgent -eq 'goose' -and $OutputFile -and (Test-Path $OutputFile)) {
+            $monitorPrompt = "Read the file at '$OutputFile' then extract the DECISION (SHIP or REVISE) and FEEDBACK from its content.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [the review feedback]"
+        } else {
+            $monitorPrompt = "Extract the DECISION (SHIP or REVISE) and FEEDBACK from the following raw agent output.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [the review feedback]`n`n---`n$Output"
+        }
         $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
         if ($monitorResponse) {
             $mDecision2 = [regex]::Match($monitorResponse, '(?i)DECISION:\s*(SHIP|REVISE)')
@@ -321,7 +340,11 @@ function Run-Cli {
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines
         if (-not $workerOutput) { Write-Host "XX WORK PHASE FAILED - No output from worker" -ForegroundColor Red; exit 1 }
 
-        $parsed = Parse-WorkerOutput -Output $workerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        # Save worker output to file for Monitor LLM fallback
+        $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
+        $workerOutput | Out-File -FilePath $workOutFile -Encoding UTF8
+
+        $parsed = Parse-WorkerOutput -Output $workerOutput -OutputFile $workOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $work = $parsed.work; $summary = $parsed.summary
         if (-not $work -or -not $summary) { Write-Host "XX WORK PHASE FAILED - Could not parse output" -ForegroundColor Red; exit 1 }
 
@@ -335,7 +358,11 @@ function Run-Cli {
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines
         if (-not $reviewerOutput) { Write-Host "XX REVIEW PHASE FAILED - No output from reviewer" -ForegroundColor Red; exit 1 }
 
-        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        # Save reviewer output to file for Monitor LLM fallback
+        $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
+        $reviewerOutput | Out-File -FilePath $reviewOutFile -Encoding UTF8
+
+        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -OutputFile $reviewOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $decision = $parsed.decision; $feedback = $parsed.feedback
         if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { Write-Host "XX REVIEW PHASE FAILED - Invalid decision: $decision" -ForegroundColor Red; exit 1 }
 
@@ -408,7 +435,11 @@ function Handle-Run { param($Id, $Params)
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines
         if (-not $workerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - No output from worker' } }
 
-        $parsed = Parse-WorkerOutput -Output $workerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        # Save worker output to file for Monitor LLM fallback
+        $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
+        $workerOutput | Out-File -FilePath $workOutFile -Encoding UTF8
+
+        $parsed = Parse-WorkerOutput -Output $workerOutput -OutputFile $workOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $work = $parsed.work; $summary = $parsed.summary
         if (-not $work -or -not $summary) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Could not parse output' } }
 
@@ -419,7 +450,11 @@ function Handle-Run { param($Id, $Params)
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines
         if (-not $reviewerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - No output from reviewer' } }
 
-        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        # Save reviewer output to file for Monitor LLM fallback
+        $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
+        $reviewerOutput | Out-File -FilePath $reviewOutFile -Encoding UTF8
+
+        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -OutputFile $reviewOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $decision = $parsed.decision; $feedback = $parsed.feedback
         if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Invalid decision: ' + $decision } }
 
