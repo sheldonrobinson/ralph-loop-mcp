@@ -123,14 +123,14 @@ function Call-WorkerLlm {
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) { 
-                $gooseArgs += '--session-id', $SessionId
+                $gooseArgs += '--name', $SessionId
             } else { 
                 $gooseArgs += '--no-session' 
             } 
             $gooseArgs += '--text', $prompt
             $env:GOOSE_MODEL = $WorkerModel
             $env:GOOSE_PROVIDER = $WorkerProvider
-            return goose $gooseArgs 2>$null 
+            return goose $gooseArgs 1>work.out 2>$null 
         }
         default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
     } 
@@ -154,14 +154,14 @@ function Call-ReviewerLlm {
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) { 
-                $gooseArgs += '--session-id', $SessionId 
+                $gooseArgs += '--name', $SessionId 
             } else { 
                 $gooseArgs += '--no-session' 
             } 
             $gooseArgs += '--text', $prompt
             $env:GOOSE_MODEL = $ReviewerModel
             $env:GOOSE_PROVIDER = $ReviewerProvider
-            return goose $gooseArgs 2>$null 
+            return goose $gooseArgs 1>reviewer.out 2>$null 
         }
         default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
     } 
@@ -183,7 +183,7 @@ function Call-MonitorLlm {
         'goose'     {
                       $env:GOOSE_MODEL = $MonitorModel
                       $env:GOOSE_PROVIDER = $MonitorProvider
-                      return $Prompt | goose run --text $Prompt 2>$null
+                      return goose run --text $Prompt 1>std.out 2>$null
                     }
         default     { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
     }
