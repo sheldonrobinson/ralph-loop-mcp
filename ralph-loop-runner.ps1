@@ -43,6 +43,9 @@ $script:ReviewerAgent = Coalesce $env:RALPH_REVIEWER_AGENT 'goose'
 $script:MaxIterations = [int](Coalesce $env:RALPH_MAX_ITERATIONS 10)
 $script:WorkGuidelines = Coalesce $env:RALPH_WORK_GUIDELINES (Join-Path $script:RalphRecipeDir 'ralph-work.yaml')
 $script:ReviewGuidelines = Coalesce $env:RALPH_REVIEW_GUIDELINES (Join-Path $script:RalphRecipeDir 'ralph-review.yaml')
+$script:MonitorModel = Coalesce $env:RALPH_MONITOR_MODEL ''
+$script:MonitorProvider = Coalesce $env:RALPH_MONITOR_PROVIDER ''
+$script:MonitorAgent = Coalesce $env:RALPH_MONITOR_AGENT ''
 
 # CLI argument placeholders
 $script:CLITask = ''
@@ -120,7 +123,7 @@ function Call-WorkerLlm {
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) { 
-                $gooseArgs += '--session-id', $SessionId, '--resume' 
+                $gooseArgs += '--session-id', $SessionId
             } else { 
                 $gooseArgs += '--no-session' 
             } 
@@ -151,7 +154,7 @@ function Call-ReviewerLlm {
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) { 
-                $gooseArgs += '--session-id', $SessionId, '--resume' 
+                $gooseArgs += '--session-id', $SessionId 
             } else { 
                 $gooseArgs += '--no-session' 
             } 
@@ -164,12 +167,78 @@ function Call-ReviewerLlm {
     } 
 }
 
-function Parse-WorkerOutput { param([string]$Output); $work = ''; $summary = ''; if ($Output -match '(?s)WORK:(.*?)SUMMARY:') { $work = $matches[1].Trim() }; if ($Output -match '(?s)SUMMARY:(.*)') { $summary = $matches[1].Trim() }; return @{ work = $work; summary = $summary } }
-function Parse-ReviewerOutput { param([string]$Output); $decision = ''; $feedback = ''; if ($Output -match '(?i)DECISION:\s*(SHIP|REVISE)') { $decision = $matches[1].ToUpper() }; if ($Output -match '(?s)FEEDBACK:\s*(.*)') { $feedback = $matches[1].Trim() }; return @{ decision = $decision; feedback = $feedback } }
+function Call-MonitorLlm {
+    param([string]$Prompt, [string]$MonitorModel, [string]$MonitorProvider, [string]$MonitorAgent)
+    if (-not $MonitorModel) { $MonitorModel = $script:MonitorModel }
+    if (-not $MonitorProvider) { $MonitorProvider = $script:MonitorProvider }
+    if (-not $MonitorAgent) { $MonitorAgent = $script:MonitorAgent }
+    # Fall back to worker settings if monitor not configured
+    if (-not $MonitorModel) { $MonitorModel = $script:WorkerModel }
+    if (-not $MonitorProvider) { $MonitorProvider = $script:WorkerProvider }
+    if (-not $MonitorAgent) { $MonitorAgent = $script:WorkerAgent }
+    switch ($MonitorAgent) {
+        'anthropic' { return $Prompt | claude --model $MonitorModel --print 2>$null }
+        'openai'    { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
+        'google'    { return $Prompt | gemini --model $MonitorModel --format=text 2>$null }
+        'goose'     {
+                      $env:GOOSE_MODEL = $MonitorModel
+                      $env:GOOSE_PROVIDER = $MonitorProvider
+                      return $Prompt | goose run --text $Prompt 2>$null
+                    }
+        default     { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
+    }
+}
+
+function Parse-WorkerOutput {
+    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '')
+    $work = ''; $summary = ''
+    $mWork = [regex]::Match($Output, '(?s)WORK:(.*?)SUMMARY:')
+    if ($mWork.Success) { $work = $mWork.Groups[1].Value.Trim() }
+    $mSummary = [regex]::Match($Output, '(?s)SUMMARY:(.*)')
+    if ($mSummary.Success) { $summary = $mSummary.Groups[1].Value.Trim() }
+    # Regex failed -- try Monitor LLM fallback
+    if (-not $work -or -not $summary) {
+        Write-Host "  Regex parsing failed for worker output, consulting Monitor LLM..." -ForegroundColor Yellow
+        $monitorPrompt = "Extract the WORK and SUMMARY sections from the following raw agent output.`n`nIf the agent created or modified files, include the file paths and key content in WORK.`nSummarize what was accomplished in SUMMARY.`n`nOutput format:`nWORK:`n[extracted work content]`n`nSUMMARY:`n[one-line summary]`n`n---`n$Output"
+        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
+        if ($monitorResponse) {
+            $mWork2 = [regex]::Match($monitorResponse, '(?s)WORK:(.*?)SUMMARY:')
+            if ($mWork2.Success) { $work = $mWork2.Groups[1].Value.Trim() }
+            $mSummary2 = [regex]::Match($monitorResponse, '(?s)SUMMARY:(.*)')
+            if ($mSummary2.Success) { $summary = $mSummary2.Groups[1].Value.Trim() }
+        }
+        if ($work -or $summary) { Write-Host "  Monitor LLM parsed successfully." -ForegroundColor Green }
+        else { Write-Host "  Monitor LLM also could not parse the output." -ForegroundColor Red }
+    }
+    return @{ work = $work; summary = $summary }
+}
+
+function Parse-ReviewerOutput {
+    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '')
+    $decision = ''; $feedback = ''
+    $mDecision = [regex]::Match($Output, '(?i)DECISION:\s*(SHIP|REVISE)')
+    if ($mDecision.Success) { $decision = $mDecision.Groups[1].Value.ToUpper() }
+    $mFeedback = [regex]::Match($Output, '(?s)FEEDBACK:\s*(.*)')
+    if ($mFeedback.Success) { $feedback = $mFeedback.Groups[1].Value.Trim() }
+    # Regex failed -- try Monitor LLM fallback
+    if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') {
+        Write-Host "  Regex parsing failed for reviewer output, consulting Monitor LLM..." -ForegroundColor Yellow
+        $monitorPrompt = "Extract the DECISION (SHIP or REVISE) and FEEDBACK from the following raw agent output.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [the review feedback]`n`n---`n$Output"
+        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
+        if ($monitorResponse) {
+            $mDecision2 = [regex]::Match($monitorResponse, '(?i)DECISION:\s*(SHIP|REVISE)')
+            if ($mDecision2.Success) { $decision = $mDecision2.Groups[1].Value.ToUpper() }
+            $mFeedback2 = [regex]::Match($monitorResponse, '(?s)FEEDBACK:\s*(.*)')
+            if ($mFeedback2.Success) { $feedback = $mFeedback2.Groups[1].Value.Trim() }
+        }
+        if ($decision -eq 'SHIP' -or $decision -eq 'REVISE') { Write-Host "  Monitor LLM parsed successfully." -ForegroundColor Green }
+        else { Write-Host "  Monitor LLM also could not parse the output." -ForegroundColor Red }
+    }
+    return @{ decision = $decision; feedback = $feedback }
+}
 
 # CLI orchestration main function
 function Run-Cli { 
-    param([string]$TaskInput)
     $workerModel = $script:WorkerModel
     $workerProvider = $script:WorkerProvider
     $workerAgent = $script:WorkerAgent
@@ -179,26 +248,36 @@ function Run-Cli {
     $maxIterations = $script:MaxIterations
     $workGuidelines = $script:WorkGuidelines
     $reviewGuidelines = $script:ReviewGuidelines
+    $monitorModel = $script:MonitorModel
+    $monitorProvider = $script:MonitorProvider
+    $monitorAgent = $script:MonitorAgent
 
-    $task = if (Test-Path $TaskInput) { Get-Content $TaskInput -Raw } else { $TaskInput }
-    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 \"task description\" or .\ralph-loop-runner.ps1 path/to/task.md" -ForegroundColor Red; exit 1 }
-
-    # Parse command line arguments
-    $args = $global:args
-    for ($i = 1; $i -lt $args.Count; $i++) {
-        switch ($args[$i]) {
-            '--worker-model' { $workerModel = $args[$i+1]; $i++ }
-            '--worker-provider' { $workerProvider = $args[$i+1]; $i++ }
-            '--worker-agent' { $workerAgent = $args[$i+1]; $i++ }
-            '--reviewer-model' { $reviewerModel = $args[$i+1]; $i++ }
-            '--reviewer-provider' { $reviewerProvider = $args[$i+1]; $i++ }
-            '--reviewer-agent' { $reviewerAgent = $args[$i+1]; $i++ }
-            '--max-iterations' { $maxIterations = [int]$args[$i+1]; $i++ }
-            '--work-guidelines' { $workGuidelines = $args[$i+1]; $i++ }
-            '--review-guidelines' { $reviewGuidelines = $args[$i+1]; $i++ }
-            '--session-id' { $script:CLISessionId = $args[$i+1]; $i++ }
+    # Parse command line arguments.
+    # Flags are consumed by name; the last positional (non-flag) argument is the task.
+    $cliArgs = $script:ScriptArgs
+    $positionalArgs = @()
+    for ($i = 0; $i -lt $cliArgs.Count; $i++) {
+        switch ($cliArgs[$i]) {
+            '--worker-model' { $workerModel = $cliArgs[$i+1]; $i++ }
+            '--worker-provider' { $workerProvider = $cliArgs[$i+1]; $i++ }
+            '--worker-agent' { $workerAgent = $cliArgs[$i+1]; $i++ }
+            '--reviewer-model' { $reviewerModel = $cliArgs[$i+1]; $i++ }
+            '--reviewer-provider' { $reviewerProvider = $cliArgs[$i+1]; $i++ }
+            '--reviewer-agent' { $reviewerAgent = $cliArgs[$i+1]; $i++ }
+            '--max-iterations' { $maxIterations = [int]$cliArgs[$i+1]; $i++ }
+            '--work-guidelines' { $workGuidelines = $cliArgs[$i+1]; $i++ }
+            '--review-guidelines' { $reviewGuidelines = $cliArgs[$i+1]; $i++ }
+            '--session-id' { $script:CLISessionId = $cliArgs[$i+1]; $i++ }
+            '--monitor-model' { $monitorModel = $cliArgs[$i+1]; $i++ }
+            '--monitor-provider' { $monitorProvider = $cliArgs[$i+1]; $i++ }
+            '--monitor-agent' { $monitorAgent = $cliArgs[$i+1]; $i++ }
+            default { $positionalArgs += $cliArgs[$i] }
         }
     }
+    # Last positional argument is the task
+    $taskInput = if ($positionalArgs.Count -gt 0) { $positionalArgs[-1] } else { '' }
+    $task = if (Test-Path $taskInput) { Get-Content $taskInput -Raw } else { $taskInput }
+    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 \"task description\" or .\ralph-loop-runner.ps1 path/to/task.md" -ForegroundColor Red; exit 1 }
 
     if (-not $workerModel) { Write-Host -NoNewline "Worker model: "; $workerModel = Read-Host; if (-not $workerModel) { exit 1 } }
     if (-not $workerProvider) { Write-Host -NoNewline "Worker provider (anthropic/openai/google/goose/copilot): "; $workerProvider = Read-Host; if (-not $workerProvider) { exit 1 } }
@@ -242,7 +321,7 @@ function Run-Cli {
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines
         if (-not $workerOutput) { Write-Host "XX WORK PHASE FAILED - No output from worker" -ForegroundColor Red; exit 1 }
 
-        $parsed = Parse-WorkerOutput -Output $workerOutput
+        $parsed = Parse-WorkerOutput -Output $workerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $work = $parsed.work; $summary = $parsed.summary
         if (-not $work -or -not $summary) { Write-Host "XX WORK PHASE FAILED - Could not parse output" -ForegroundColor Red; exit 1 }
 
@@ -256,7 +335,7 @@ function Run-Cli {
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines
         if (-not $reviewerOutput) { Write-Host "XX REVIEW PHASE FAILED - No output from reviewer" -ForegroundColor Red; exit 1 }
 
-        $parsed = Parse-ReviewerOutput -Output $reviewerOutput
+        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $decision = $parsed.decision; $feedback = $parsed.feedback
         if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { Write-Host "XX REVIEW PHASE FAILED - Invalid decision: $decision" -ForegroundColor Red; exit 1 }
 
@@ -309,6 +388,9 @@ function Handle-Run { param($Id, $Params)
     $crossModelEnforced = Coalesce $paramsObj['crossModelReviewEnforced'] $true
     $workGuidelines = Coalesce $paramsObj['workGuidelines'] ''
     $reviewGuidelines = Coalesce $paramsObj['reviewGuidelines'] ''
+    $monitorModel = Coalesce $paramsObj['monitorModel'] $script:MonitorModel
+    $monitorProvider = Coalesce $paramsObj['monitorProvider'] $script:MonitorProvider
+    $monitorAgent = Coalesce $paramsObj['monitorAgent'] $script:MonitorAgent
 
     if (-not $task) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Task is required' } }
     if (-not $workerModel -or -not $workerProvider -or -not $reviewerModel -or -not $reviewerProvider) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'workerModel, workerProvider, reviewerModel, and reviewerProvider are required' } }
@@ -326,7 +408,7 @@ function Handle-Run { param($Id, $Params)
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines
         if (-not $workerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - No output from worker' } }
 
-        $parsed = Parse-WorkerOutput -Output $workerOutput
+        $parsed = Parse-WorkerOutput -Output $workerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $work = $parsed.work; $summary = $parsed.summary
         if (-not $work -or -not $summary) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Could not parse output' } }
 
@@ -337,7 +419,7 @@ function Handle-Run { param($Id, $Params)
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines
         if (-not $reviewerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - No output from reviewer' } }
 
-        $parsed = Parse-ReviewerOutput -Output $reviewerOutput
+        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
         $decision = $parsed.decision; $feedback = $parsed.feedback
         if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Invalid decision: ' + $decision } }
 
@@ -362,8 +444,9 @@ function Handle-ListMethods { param($Id); $methods = @('ralph_loop_initialize','
 # =============================================================================
 
 if ($args.Count -gt 0) {
-    # CLI MODE: Run orchestration with task argument
-    Run-Cli -TaskInput $args[0]
+    # CLI MODE: Run orchestration with task argument and options
+    $script:ScriptArgs = $args
+    Run-Cli
 } else {
     # MCP SERVER MODE: Handle JSON-RPC requests
     $initResp = @{ jsonrpc = '2.0'; id = $null; result = @{ protocolVersion = '2024-11-05'; capabilities = @{ tools = @{} }; serverInfo = @{ name = 'ralph-loop-runner'; version = '1.0.0' } } }
