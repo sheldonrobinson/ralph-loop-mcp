@@ -45,7 +45,7 @@ $script:WorkGuidelines = Coalesce $env:RALPH_WORK_GUIDELINES (Join-Path $script:
 $script:ReviewGuidelines = Coalesce $env:RALPH_REVIEW_GUIDELINES (Join-Path $script:RalphRecipeDir 'ralph-review.yaml')
 $script:MonitorModel = Coalesce $env:RALPH_MONITOR_MODEL ''
 $script:MonitorProvider = Coalesce $env:RALPH_MONITOR_PROVIDER ''
-$script:MonitorAgent = Coalesce $env:RALPH_MONITOR_AGENT ''
+$script:MonitorAgent = Coalesce $env:RALPH_MONITOR_AGENT 'goose'
 
 # CLI argument placeholders
 $script:CLITask = ''
