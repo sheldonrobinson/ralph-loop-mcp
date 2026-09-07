@@ -47,12 +47,13 @@ The Ralph Loop implements a two-phase iterative workflow:
 
 - **Cross-platform Native**: Single script per platform (Bash for Linux/macOS, PowerShell for Windows) — no Node.js runtime required
 - **Dual Mode Operation**: 
-  - **MCP Server Mode** — JSON-RPC 2.0 over stdio for integration with AI agents
+  - **MCP Server Mode** — JSON-RPC 2.0 over stdio with standard MCP `tools/list` JSON Schemas for integration with AI agents
   - **CLI Mode** — Run the full loop directly from command line
 - **Session-based**: Multiple concurrent Ralph Loop sessions supported
-- **File-based State**: Persistent state stored in `~/.goose/ralph/{sessionId}/`
+- **File-based State**: Persistent state and historical iteration artifacts stored in `~/.goose/ralph/{sessionId}/history/`
 - **11 MCP Tools**: Complete workflow control via MCP tools, including `ralph_loop_run` for full automation
 - **Cross-Model Review**: Worker/reviewer model configuration with validation
+- **Monitoring Agent**: Automatic fallback parsing of worker/reviewer outputs
 - **Multiple LLM Providers**: Anthropic (Claude), OpenAI, Google (Gemini), GitHub Copilot, Goose
 - **Flexible Configuration**: Environment variables, CLI arguments, or MCP tool calls
 
@@ -306,11 +307,11 @@ For more control, use individual tools:
 
 ## State Management
 
-State is stored in `~/.goose/ralph/{sessionId}/`:
+State is stored in `~/.goose/ralph/{sessionId}/` with persistent iteration history:
 
 ```
 ~/.goose/ralph/my-feature/
-├── config.json           # Worker/reviewer model configuration
+├── config.json           # Worker/reviewer/monitor model configuration
 ├── task.json             # Original task
 ├── work.json             # Current work submission
 ├── review.json           # Current review
@@ -318,7 +319,15 @@ State is stored in `~/.goose/ralph/{sessionId}/`:
 ├── review-result.txt     # SHIP/REVISE decision
 ├── review-feedback.txt   # Reviewer feedback
 ├── RALPH-BLOCKED.md      # Blocking reason (if blocked)
-└── iteration.txt         # Current iteration number
+└── history/              # Iteration history persistence
+    ├── iteration_1/
+    │   ├── work.json     # Iteration 1 work & summary
+    │   ├── review.json   # Iteration 1 decision & feedback
+    │   ├── work.out      # Raw worker CLI output
+    │   └── review.out    # Raw reviewer CLI output
+    └── iteration_2/
+        ├── work.json
+        └── review.json
 ```
 
 ## Cross-Model Review Setup
@@ -336,6 +345,14 @@ For true cross-model review, use different models for worker and reviewer:
 - Gives specific feedback for revision
 
 The `crossModelReviewEnforced` option (default: true) validates that worker and reviewer use different models/providers, warning if they are the same.
+
+## Monitoring Agent
+
+Both Bash (`ralph-loop-runner.sh`) and PowerShell (`ralph-loop-runner.ps1`) implementations support a **Monitoring Agent** (`monitorModel`, `monitorProvider`, `monitorAgent`).
+
+The monitor serves as a robust supervisor and fallback parser:
+- When regex parsing fails to extract `WORK`/`SUMMARY` from worker output or `DECISION`/`FEEDBACK` from reviewer output, the runner automatically delegates to the Monitoring Agent to inspect the raw output files (`work.out`, `review.out`) and extract the structured results.
+- Configurable via environment variables (`RALPH_MONITOR_MODEL`, `RALPH_MONITOR_PROVIDER`, `RALPH_MONITOR_AGENT`) or CLI arguments (`--monitor-model`, `--monitor-provider`, `--monitor-agent`). Falls back to worker configuration if not explicitly specified.
 
 ## Blocking
 
@@ -371,6 +388,9 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 | `RALPH_MAX_ITERATIONS` | Max iterations (-1 for unlimited) | 10 |
 | `RALPH_WORK_GUIDELINES` | Path to work guidelines/recipe | `$RALPH_RECIPE_DIR/ralph-work.yaml` |
 | `RALPH_REVIEW_GUIDELINES` | Path to review guidelines/recipe | `$RALPH_RECIPE_DIR/ralph-review.yaml` |
+| `RALPH_MONITOR_MODEL` | Monitor model name | — |
+| `RALPH_MONITOR_PROVIDER` | Monitor provider (anthropic/openai/google/copilot/goose) | — |
+| `RALPH_MONITOR_AGENT` | Monitor agent (goose/claude/openai/gemini/copilot) | goose |
 | `RALPH_RECIPE_DIR` | Base directory for recipes | `/usr/local/share/ralph-loop-runner/recipes` |
 
 ### Command-Line Arguments (CLI Mode)
@@ -383,6 +403,9 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 | `--reviewer-model MODEL` | Reviewer model name |
 | `--reviewer-provider PROVIDER` | Reviewer provider (anthropic/openai/google/copilot/goose) |
 | `--reviewer-agent AGENT` | Reviewer agent (goose/claude/openai/gemini/copilot) |
+| `--monitor-model MODEL` | Monitor model name |
+| `--monitor-provider PROVIDER` | Monitor provider (anthropic/openai/google/copilot/goose) |
+| `--monitor-agent AGENT` | Monitor agent (goose/claude/openai/gemini/copilot) |
 | `--max-iterations N` | Max iterations (-1 for unlimited) |
 | `--work-guidelines FILE` | Work guidelines/recipe file |
 | `--review-guidelines FILE` | Review guidelines/recipe file |
@@ -412,6 +435,9 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
   reviewerModel?: string;          // e.g., "gpt-4o"
   reviewerProvider?: string;       // e.g., "openai"
   reviewerAgent?: string;          // e.g., "goose"
+  monitorModel?: string;           // e.g., "claude-3-5-sonnet"
+  monitorProvider?: string;        // e.g., "anthropic"
+  monitorAgent?: string;           // e.g., "goose"
   crossModelReviewEnforced?: boolean; // default: true
   workGuidelines?: string;         // path to work guidelines
   reviewGuidelines?: string;       // path to review guidelines
@@ -488,6 +514,9 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
   reviewerModel: string;           // required
   reviewerProvider: string;        // required
   reviewerAgent?: string;          // default: "goose"
+  monitorModel?: string;           // e.g., "claude-3-5-sonnet"
+  monitorProvider?: string;        // e.g., "anthropic"
+  monitorAgent?: string;           // default: "goose"
   crossModelReviewEnforced?: boolean; // default: true
   workGuidelines?: string;         // path to work guidelines
   reviewGuidelines?: string;       // path to review guidelines

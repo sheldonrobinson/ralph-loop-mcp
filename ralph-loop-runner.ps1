@@ -64,31 +64,123 @@ function New-JsonResponse { param($Id, [string]$Result = '', [hashtable]$Error =
 # CONFIG MANAGEMENT
 # =============================================================================
 function Set-Config { 
-    param([string]$SessionId, [string]$WorkerModel, [string]$WorkerProvider, [string]$ReviewerModel, [string]$ReviewerProvider, [int]$MaxIterations = 10, [bool]$CrossModelEnforced = $true, [string]$WorkerAgent = 'goose', [string]$ReviewerAgent = 'goose', [string]$WorkGuidelines = '', [string]$ReviewGuidelines = '')
+    param(
+        [string]$SessionId,
+        [string]$WorkerModel,
+        [string]$WorkerProvider,
+        [string]$ReviewerModel,
+        [string]$ReviewerProvider,
+        [int]$MaxIterations = 10,
+        [bool]$CrossModelEnforced = $true,
+        [string]$WorkerAgent = 'goose',
+        [string]$ReviewerAgent = 'goose',
+        [string]$WorkGuidelines = '',
+        [string]$ReviewGuidelines = '',
+        [string]$MonitorModel = '',
+        [string]$MonitorProvider = '',
+        [string]$MonitorAgent = 'goose'
+    )
     Ensure-StateDir -SessionId $SessionId
     $configFile = Get-StateFile -SessionId $SessionId -FileName 'config.json'
-    $config = @{ workerModel = $WorkerModel; workerProvider = $WorkerProvider; workerAgent = $WorkerAgent; reviewerModel = $ReviewerModel; reviewerProvider = $ReviewerProvider; reviewerAgent = $ReviewerAgent; maxIterations = $MaxIterations; crossModelReviewEnforced = $CrossModelEnforced; workGuidelines = $WorkGuidelines; reviewGuidelines = $ReviewGuidelines; configuredAt = (Get-Date).ToString('o') }
+    $config = @{
+        workerModel = $WorkerModel
+        workerProvider = $WorkerProvider
+        workerAgent = $WorkerAgent
+        reviewerModel = $ReviewerModel
+        reviewerProvider = $ReviewerProvider
+        reviewerAgent = $ReviewerAgent
+        monitorModel = $MonitorModel
+        monitorProvider = $MonitorProvider
+        monitorAgent = $MonitorAgent
+        maxIterations = $MaxIterations
+        crossModelReviewEnforced = $CrossModelEnforced
+        workGuidelines = $WorkGuidelines
+        reviewGuidelines = $ReviewGuidelines
+        configuredAt = (Get-Date).ToString('o')
+    }
     $config | ConvertTo-Json -Depth 10 | Set-Content -Path $configFile -Encoding UTF8 
 }
+
 function Get-Config { param([string]$SessionId = 'default'); $configFile = Get-StateFile -SessionId $SessionId -FileName 'config.json'; if (Test-Path $configFile) { return Get-Content $configFile -Raw -Encoding UTF8 }; return '' }
-function Test-CrossModel { param([string]$SessionId = 'default'); $config = Get-Config -SessionId $SessionId; if (-not $config) { return '{"valid":true}' }; $configObj = $config | ConvertFrom-Json; $enforced = Coalesce $configObj.crossModelReviewEnforced $true; if ($enforced -ne $true) { return '{"valid":true}' }; $workerModel = Coalesce $configObj.workerModel ''; $workerProvider = Coalesce $configObj.workerProvider ''; $reviewerModel = Coalesce $configObj.reviewerModel ''; $reviewerProvider = Coalesce $configObj.reviewerProvider ''; if ($workerModel -and $reviewerModel -and $workerModel -eq $reviewerModel -and $workerProvider -eq $reviewerProvider) { return '{"valid":false,"warning":"Worker and reviewer are the same model/provider. Cross-model review requires different models."}' }; return '{"valid":true}' }
+
+function Test-CrossModel { 
+    param([string]$SessionId = 'default')
+    $config = Get-Config -SessionId $SessionId
+    if (-not $config) { return '{"valid":true}' }
+    $configObj = $config | ConvertFrom-Json
+    $enforced = Coalesce $configObj.crossModelReviewEnforced $true
+    if ($enforced -ne $true) { return '{"valid":true}' }
+    $workerModel = Coalesce $configObj.workerModel ''
+    $workerProvider = Coalesce $configObj.workerProvider ''
+    $reviewerModel = Coalesce $configObj.reviewerModel ''
+    $reviewerProvider = Coalesce $configObj.reviewerProvider ''
+    if ($workerModel -and $reviewerModel -and $workerModel -eq $reviewerModel -and $workerProvider -eq $reviewerProvider) { 
+        return '{"valid":false,"warning":"Worker and reviewer are the same model/provider. Cross-model review requires different models."}' 
+    }
+    return '{"valid":true}'
+}
 
 # =============================================================================
 # TASK MANAGEMENT
 # =============================================================================
-function Set-Task { param([string]$SessionId, [string]$Task); Ensure-StateDir -SessionId $SessionId; $taskFile = Get-StateFile -SessionId $SessionId -FileName 'task.json'; $task = @{ task = $Task; createdAt = (Get-Date).ToString('o') }; $task | ConvertTo-Json -Depth 10 | Set-Content -Path $taskFile -Encoding UTF8; $blockedFile = Get-StateFile -SessionId $SessionId -FileName 'RALPH-BLOCKED.md'; if (Test-Path $blockedFile) { Remove-Item $blockedFile -Force } }
+function Set-Task { 
+    param([string]$SessionId, [string]$Task)
+    Ensure-StateDir -SessionId $SessionId
+    $taskFile = Get-StateFile -SessionId $SessionId -FileName 'task.json'
+    $task = @{ task = $Task; createdAt = (Get-Date).ToString('o') }
+    $task | ConvertTo-Json -Depth 10 | Set-Content -Path $taskFile -Encoding UTF8
+    $blockedFile = Get-StateFile -SessionId $SessionId -FileName 'RALPH-BLOCKED.md'
+    if (Test-Path $blockedFile) { Remove-Item $blockedFile -Force }
+}
+
 function Get-Task { param([string]$SessionId = 'default'); $taskFile = Get-StateFile -SessionId $SessionId -FileName 'task.json'; if (Test-Path $taskFile) { return Get-Content $taskFile -Raw -Encoding UTF8 }; return '' }
 
 # =============================================================================
-# WORK MANAGEMENT
+# WORK MANAGEMENT & ITERATION HISTORY
 # =============================================================================
-function Set-Work { param([string]$SessionId, [string]$Work, [string]$Summary, [int]$Iteration); Ensure-StateDir -SessionId $SessionId; $workFile = Get-StateFile -SessionId $SessionId -FileName 'work.json'; $work = @{ work = $Work; summary = $Summary; submittedAt = (Get-Date).ToString('o'); iteration = $Iteration }; $work | ConvertTo-Json -Depth 10 | Set-Content -Path $workFile -Encoding UTF8; $completeFile = Get-StateFile -SessionId $SessionId -FileName 'work-complete.txt'; '{"ok":true}' | Set-Content -Path $completeFile -Encoding UTF8 }
+function Set-Work { 
+    param([string]$SessionId, [string]$Work, [string]$Summary, [int]$Iteration)
+    Ensure-StateDir -SessionId $SessionId
+    $workFile = Get-StateFile -SessionId $SessionId -FileName 'work.json'
+    $workObj = @{ work = $Work; summary = $Summary; submittedAt = (Get-Date).ToString('o'); iteration = $Iteration }
+    $workObj | ConvertTo-Json -Depth 10 | Set-Content -Path $workFile -Encoding UTF8
+    $completeFile = Get-StateFile -SessionId $SessionId -FileName 'work-complete.txt'
+    '{"ok":true}' | Set-Content -Path $completeFile -Encoding UTF8
+
+    # Iteration History Persistence
+    $histDir = Join-Path (Join-Path (Get-StateDir -SessionId $SessionId) 'history') "iteration_$Iteration"
+    if (-not (Test-Path $histDir)) { New-Item -ItemType Directory -Path $histDir -Force | Out-Null }
+    Copy-Item -Path $workFile -Destination (Join-Path $histDir 'work.json') -Force
+    $workOutFile = Get-StateFile -SessionId $SessionId -FileName 'work.out'
+    if (Test-Path $workOutFile) { Copy-Item -Path $workOutFile -Destination (Join-Path $histDir 'work.out') -Force }
+}
+
 function Get-Work { param([string]$SessionId = 'default'); $workFile = Get-StateFile -SessionId $SessionId -FileName 'work.json'; if (Test-Path $workFile) { return Get-Content $workFile -Raw -Encoding UTF8 }; return '' }
 
 # =============================================================================
-# REVIEW MANAGEMENT
+# REVIEW MANAGEMENT & ITERATION HISTORY
 # =============================================================================
-function Set-Review { param([string]$SessionId, [string]$Decision, [string]$Feedback, [int]$Iteration); Ensure-StateDir -SessionId $SessionId; $reviewFile = Get-StateFile -SessionId $SessionId -FileName 'review.json'; $review = @{ decision = $Decision; feedback = $Feedback; reviewedAt = (Get-Date).ToString('o'); iteration = $Iteration }; $review | ConvertTo-Json -Depth 10 | Set-Content -Path $reviewFile -Encoding UTF8; $resultFile = Get-StateFile -SessionId $SessionId -FileName 'review-result.txt'; @{ decision = $Decision } | ConvertTo-Json -Compress -Depth 10 | Set-Content -Path $resultFile -Encoding UTF8; $feedbackFile = Get-StateFile -SessionId $SessionId -FileName 'review-feedback.txt'; @{ feedback = $Feedback } | ConvertTo-Json -Compress -Depth 10 | Set-Content -Path $feedbackFile -Encoding UTF8; if ($Decision -eq 'REVISE') { Cleanup-ForNextIteration -SessionId $SessionId } }
+function Set-Review { 
+    param([string]$SessionId, [string]$Decision, [string]$Feedback, [int]$Iteration)
+    Ensure-StateDir -SessionId $SessionId
+    $reviewFile = Get-StateFile -SessionId $SessionId -FileName 'review.json'
+    $reviewObj = @{ decision = $Decision; feedback = $Feedback; reviewedAt = (Get-Date).ToString('o'); iteration = $Iteration }
+    $reviewObj | ConvertTo-Json -Depth 10 | Set-Content -Path $reviewFile -Encoding UTF8
+    $resultFile = Get-StateFile -SessionId $SessionId -FileName 'review-result.txt'
+    @{ decision = $Decision } | ConvertTo-Json -Compress -Depth 10 | Set-Content -Path $resultFile -Encoding UTF8
+    $feedbackFile = Get-StateFile -SessionId $SessionId -FileName 'review-feedback.txt'
+    @{ feedback = $Feedback } | ConvertTo-Json -Compress -Depth 10 | Set-Content -Path $feedbackFile -Encoding UTF8
+
+    # Iteration History Persistence
+    $histDir = Join-Path (Join-Path (Get-StateDir -SessionId $SessionId) 'history') "iteration_$Iteration"
+    if (-not (Test-Path $histDir)) { New-Item -ItemType Directory -Path $histDir -Force | Out-Null }
+    Copy-Item -Path $reviewFile -Destination (Join-Path $histDir 'review.json') -Force
+    $reviewOutFile = Get-StateFile -SessionId $SessionId -FileName 'review.out'
+    if (Test-Path $reviewOutFile) { Copy-Item -Path $reviewOutFile -Destination (Join-Path $histDir 'review.out') -Force }
+
+    if ($Decision -eq 'REVISE') { Cleanup-ForNextIteration -SessionId $SessionId }
+}
+
 function Get-Review { param([string]$SessionId = 'default'); $reviewFile = Get-StateFile -SessionId $SessionId -FileName 'review.json'; if (Test-Path $reviewFile) { return Get-Content $reviewFile -Raw -Encoding UTF8 }; return '' }
 function Get-ReviewResult { param([string]$SessionId = 'default'); $resultFile = Get-StateFile -SessionId $SessionId -FileName 'review-result.txt'; if (Test-Path $resultFile) { $content = Get-Content $resultFile -Raw -Encoding UTF8; return ($content | ConvertFrom-Json).decision }; return '' }
 function Get-Feedback { param([string]$SessionId = 'default'); $feedbackFile = Get-StateFile -SessionId $SessionId -FileName 'review-feedback.txt'; if (Test-Path $feedbackFile) { $content = Get-Content $feedbackFile -Raw -Encoding UTF8; return ($content | ConvertFrom-Json).feedback }; return '' }
@@ -96,10 +188,137 @@ function Get-Feedback { param([string]$SessionId = 'default'); $feedbackFile = G
 # =============================================================================
 # STATUS MANAGEMENT
 # =============================================================================
-function Get-Status { param([string]$SessionId = 'default', [int]$MaxIterations = 10); $task = Get-Task -SessionId $SessionId; $work = Get-Work -SessionId $SessionId; $reviewResult = Get-ReviewResult -SessionId $SessionId; $feedback = Get-Feedback -SessionId $SessionId; $config = Get-Config -SessionId $SessionId; $blocked = Test-Path (Get-StateFile -SessionId $SessionId -FileName 'RALPH-BLOCKED.md'); $crossModelValidation = Test-CrossModel -SessionId $SessionId | JsonToDict; $phase = 'WORK'; $status = 'running'; $currentIteration = 1; if ($blocked) { $phase = 'BLOCKED'; $status = 'blocked' } elseif ($reviewResult -eq 'SHIP') { $phase = 'COMPLETE'; $status = 'shipped'; if ($work) { $workObj = JsonToDict $work; $currentIteration = Coalesce $workObj['iteration'] 1 } } elseif ($reviewResult -eq 'REVISE') { $phase = 'WORK'; $status = 'revised'; if ($work) { $workObj = JsonToDict $work; $currentIteration = (Coalesce $workObj['iteration'] 1) + 1 } } elseif ($work) { $phase = 'REVIEW'; $status = 'running'; $workObj = JsonToDict $work; $currentIteration = Coalesce $workObj['iteration'] 1 }; if ($currentIteration -gt $MaxIterations -and $status -eq 'running') { $status = 'max_iterations_reached'; $phase = 'COMPLETE' }; $taskText = ''; $createdAt = ''; if ($task) { $taskObj = JsonToDict $task; $taskText = Coalesce $taskObj['task'] ''; $createdAt = Coalesce $taskObj['createdAt'] '' }; $workSummary = ''; if ($work) { $workObj = JsonToDict $work; $workSummary = Coalesce $workObj['summary'] '' }; $workerModel = ''; $workerProvider = ''; $workerAgent = ''; $reviewerModel = ''; $reviewerProvider = ''; $reviewerAgent = ''; $crossModelEnforced = $true; $crossModelValid = $true; $crossModelWarning = ''; $workGuidelines = ''; $reviewGuidelines = ''; if ($config) { $configObj = JsonToDict $config; $workerModel = Coalesce $configObj['workerModel'] ''; $workerProvider = Coalesce $configObj['workerProvider'] ''; $workerAgent = Coalesce $configObj['workerAgent'] ''; $reviewerModel = Coalesce $configObj['reviewerModel'] ''; $reviewerProvider = Coalesce $configObj['reviewerProvider'] ''; $reviewerAgent = Coalesce $configObj['reviewerAgent'] ''; $crossModelEnforced = Coalesce $configObj['crossModelReviewEnforced'] $true; $crossModelValid = Coalesce $crossModelValidation['valid'] $true; $crossModelWarning = Coalesce $crossModelValidation['warning'] ''; $workGuidelines = Coalesce $configObj['workGuidelines'] ''; $reviewGuidelines = Coalesce $configObj['reviewGuidelines'] '' }; $statusObj = @{ sessionId = $SessionId; currentIteration = $currentIteration; maxIterations = $MaxIterations; phase = $phase; status = $status; task = if ($taskText) { $taskText } else { $null }; lastWorkSummary = if ($workSummary) { $workSummary } else { $null }; lastFeedback = if ($feedback) { $feedback } else { $null }; createdAt = if ($createdAt) { $createdAt } else { $null }; updatedAt = (Get-Date).ToString('o'); workerModel = if ($workerModel) { $workerModel } else { $null }; workerProvider = if ($workerProvider) { $workerProvider } else { $null }; workerAgent = if ($workerAgent) { $workerAgent } else { $null }; reviewerModel = if ($reviewerModel) { $reviewerModel } else { $null }; reviewerProvider = if ($reviewerProvider) { $reviewerProvider } else { $null }; reviewerAgent = if ($reviewerAgent) { $reviewerAgent } else { $null }; crossModelReviewEnforced = $crossModelEnforced; crossModelReviewValid = $crossModelValid; crossModelReviewWarning = if ($crossModelWarning) { $crossModelWarning } else { $null }; workGuidelines = if ($workGuidelines) { $workGuidelines } else { $null }; reviewGuidelines = if ($reviewGuidelines) { $reviewGuidelines } else { $null } }; return $statusObj | ConvertTo-Json -Depth 10 }
-function Cleanup-ForNextIteration { param([string]$SessionId); $files = @('work-complete.txt', 'review-result.txt', 'review-feedback.txt', 'work.json', 'review.json'); foreach ($file in $files) { $path = Get-StateFile -SessionId $SessionId -FileName $file; if (Test-Path $path) { Remove-Item $path -Force } } }
-function Reset-Session { param([string]$SessionId); $stateDir = Get-StateDir -SessionId $SessionId; if (Test-Path $stateDir) { Remove-Item $stateDir -Recurse -Force } }
-function Block-Iteration { param([string]$SessionId, [string]$Reason); Ensure-StateDir -SessionId $SessionId; $blockedFile = Get-StateFile -SessionId $SessionId -FileName 'RALPH-BLOCKED.md'; $Reason | Set-Content -Path $blockedFile -Encoding UTF8 }
+function Get-Status { 
+    param([string]$SessionId = 'default', [int]$MaxIterations = 10)
+    $task = Get-Task -SessionId $SessionId
+    $work = Get-Work -SessionId $SessionId
+    $reviewResult = Get-ReviewResult -SessionId $SessionId
+    $feedback = Get-Feedback -SessionId $SessionId
+    $config = Get-Config -SessionId $SessionId
+    $blocked = Test-Path (Get-StateFile -SessionId $SessionId -FileName 'RALPH-BLOCKED.md')
+    $crossModelValidation = Test-CrossModel -SessionId $SessionId | JsonToDict
+    $phase = 'WORK'
+    $status = 'running'
+    $currentIteration = 1
+    if ($blocked) {
+        $phase = 'BLOCKED'
+        $status = 'blocked'
+    } elseif ($reviewResult -eq 'SHIP') {
+        $phase = 'COMPLETE'
+        $status = 'shipped'
+        if ($work) {
+            $workObj = JsonToDict $work
+            $currentIteration = Coalesce $workObj['iteration'] 1
+        }
+    } elseif ($reviewResult -eq 'REVISE') {
+        $phase = 'WORK'
+        $status = 'revised'
+        if ($work) {
+            $workObj = JsonToDict $work
+            $currentIteration = (Coalesce $workObj['iteration'] 1) + 1
+        }
+    } elseif ($work) {
+        $phase = 'REVIEW'
+        $status = 'running'
+        $workObj = JsonToDict $work
+        $currentIteration = Coalesce $workObj['iteration'] 1
+    }
+    if ($currentIteration -gt $MaxIterations -and $status -eq 'running') {
+        $status = 'max_iterations_reached'
+        $phase = 'COMPLETE'
+    }
+    $taskText = ''
+    $createdAt = ''
+    if ($task) {
+        $taskObj = JsonToDict $task
+        $taskText = Coalesce $taskObj['task'] ''
+        $createdAt = Coalesce $taskObj['createdAt'] ''
+    }
+    $workSummary = ''
+    if ($work) {
+        $workObj = JsonToDict $work
+        $workSummary = Coalesce $workObj['summary'] ''
+    }
+    $workerModel = ''
+    $workerProvider = ''
+    $workerAgent = ''
+    $reviewerModel = ''
+    $reviewerProvider = ''
+    $reviewerAgent = ''
+    $monitorModel = ''
+    $monitorProvider = ''
+    $monitorAgent = ''
+    $crossModelEnforced = $true
+    $crossModelValid = $true
+    $crossModelWarning = ''
+    $workGuidelines = ''
+    $reviewGuidelines = ''
+    if ($config) {
+        $configObj = JsonToDict $config
+        $workerModel = Coalesce $configObj['workerModel'] ''
+        $workerProvider = Coalesce $configObj['workerProvider'] ''
+        $workerAgent = Coalesce $configObj['workerAgent'] ''
+        $reviewerModel = Coalesce $configObj['reviewerModel'] ''
+        $reviewerProvider = Coalesce $configObj['reviewerProvider'] ''
+        $reviewerAgent = Coalesce $configObj['reviewerAgent'] ''
+        $monitorModel = Coalesce $configObj['monitorModel'] ''
+        $monitorProvider = Coalesce $configObj['monitorProvider'] ''
+        $monitorAgent = Coalesce $configObj['monitorAgent'] ''
+        $crossModelEnforced = Coalesce $configObj['crossModelReviewEnforced'] $true
+        $crossModelValid = Coalesce $crossModelValidation['valid'] $true
+        $crossModelWarning = Coalesce $crossModelValidation['warning'] ''
+        $workGuidelines = Coalesce $configObj['workGuidelines'] ''
+        $reviewGuidelines = Coalesce $configObj['reviewGuidelines'] ''
+    }
+    return @{
+        sessionId = $SessionId
+        currentIteration = $currentIteration
+        maxIterations = $MaxIterations
+        phase = $phase
+        status = $status
+        task = if ($taskText) { $taskText } else { $null }
+        lastWorkSummary = if ($workSummary) { $workSummary } else { $null }
+        lastFeedback = if ($feedback) { $feedback } else { $null }
+        createdAt = if ($createdAt) { $createdAt } else { $null }
+        updatedAt = (Get-Date).ToString('o')
+        workerModel = if ($workerModel) { $workerModel } else { $null }
+        workerProvider = if ($workerProvider) { $workerProvider } else { $null }
+        workerAgent = if ($workerAgent) { $workerAgent } else { $null }
+        reviewerModel = if ($reviewerModel) { $reviewerModel } else { $null }
+        reviewerProvider = if ($reviewerProvider) { $reviewerProvider } else { $null }
+        reviewerAgent = if ($reviewerAgent) { $reviewerAgent } else { $null }
+        monitorModel = if ($monitorModel) { $monitorModel } else { $null }
+        monitorProvider = if ($monitorProvider) { $monitorProvider } else { $null }
+        monitorAgent = if ($monitorAgent) { $monitorAgent } else { $null }
+        crossModelReviewEnforced = $crossModelEnforced
+        crossModelReviewValid = $crossModelValid
+        crossModelReviewWarning = if ($crossModelWarning) { $crossModelWarning } else { $null }
+        workGuidelines = if ($workGuidelines) { $workGuidelines } else { $null }
+        reviewGuidelines = if ($reviewGuidelines) { $reviewGuidelines } else { $null }
+    }
+}
+
+function Cleanup-ForNextIteration { 
+    param([string]$SessionId)
+    $files = @('work-complete.txt', 'review-result.txt', 'review-feedback.txt', 'work.json', 'review.json', 'work.out', 'review.out')
+    foreach ($file in $files) { 
+        $path = Get-StateFile -SessionId $SessionId -FileName $file
+        if (Test-Path $path) { Remove-Item $path -Force } 
+    } 
+}
+
+function Reset-Session { 
+    param([string]$SessionId)
+    $stateDir = Get-StateDir -SessionId $SessionId
+    if (Test-Path $stateDir) { Remove-Item $stateDir -Recurse -Force } 
+}
+
+function Block-Iteration { 
+    param([string]$SessionId, [string]$Reason)
+    Ensure-StateDir -SessionId $SessionId
+    $blockedFile = Get-StateFile -SessionId $SessionId -FileName 'RALPH-BLOCKED.md'
+    $Reason | Set-Content -Path $blockedFile -Encoding UTF8 
+}
 
 # =============================================================================
 # ORCHESTRATION HELPERS (CLI mode)
@@ -150,8 +369,8 @@ function Call-ReviewerLlm {
             if ($Work) { $gooseParams += "Work=$Work" }
             if ($Summary) { $gooseParams += "Summary=$Summary" }
             $gooseArgs = @('run')
-            if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
-                $gooseArgs += '--recipe', $WorkGuidelines
+            if ($ReviewGuidelines -and (Test-Path $ReviewGuidelines)) { 
+                $gooseArgs += '--recipe', $ReviewGuidelines
             }
             $gooseArgs += '--params', ($gooseParams -join ' ')
             if ($SessionId) {
@@ -189,7 +408,7 @@ function Call-MonitorLlm {
                       $tempFile = Join-Path $env:TEMP "ralph-monitor-$([System.IO.Path]::GetRandomFileName()).txt"
                       try {
                           $Prompt | Out-File -FilePath $tempFile -Encoding UTF8
-                          return goose run -i $tempFile 2>$null
+                          return goose run --no-session -i $tempFile 2>$null
                       } finally {
                           if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
                       }
@@ -317,11 +536,14 @@ function Run-Cli {
     Write-Host "Task: $task"
     Write-Host "Worker: $workerModel ($workerProvider) via $workerAgent"
     Write-Host "Reviewer: $reviewerModel ($reviewerProvider) via $reviewerAgent"
+    if ($monitorModel) {
+        Write-Host "Monitor: $monitorModel ($monitorProvider) via $monitorAgent"
+    }
     if ($maxIterations -eq -1) { Write-Host "Max Iterations: unlimited" } else { Write-Host "Max Iterations: $maxIterations" }
     Write-Host ""
 
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $true -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $true -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
 
     $feedback = ''
     $iteration = 1
@@ -391,17 +613,201 @@ function Run-Cli {
 # =============================================================================
 # TOOL HANDLERS (MCP Server mode)
 # =============================================================================
-function Handle-Initialize { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $task = Coalesce $paramsObj['task'] ''; $maxIterations = Coalesce $paramsObj['maxIterations'] 10; $workerModel = Coalesce $paramsObj['workerModel'] ''; $workerProvider = Coalesce $paramsObj['workerProvider'] ''; $workerAgent = Coalesce $paramsObj['workerAgent'] 'goose'; $reviewerModel = Coalesce $paramsObj['reviewerModel'] ''; $reviewerProvider = Coalesce $paramsObj['reviewerProvider'] ''; $reviewerAgent = Coalesce $paramsObj['reviewerAgent'] 'goose'; $crossModelEnforced = Coalesce $paramsObj['crossModelReviewEnforced'] $true; $workGuidelines = Coalesce $paramsObj['workGuidelines'] ''; $reviewGuidelines = Coalesce $paramsObj['reviewGuidelines'] ''; if (-not $task) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Task is required' } }; Set-Task -SessionId $sessionId -Task $task; Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines; $validation = Test-CrossModel -SessionId $sessionId | JsonToDict; $status = Get-Status -SessionId $sessionId -MaxIterations $maxIterations | JsonToDict; $result = @{ success = $true; message = "Ralph Loop initialized for session `"$sessionId`""; status = $status; crossModelReview = @{ enforced = $crossModelEnforced; valid = Coalesce $validation['valid'] $true; warning = Coalesce $validation['warning'] '' } }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-GetTask { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $task = Get-Task -SessionId $sessionId; if (-not $task) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No task found. Initialize the session first with ralph_loop_initialize.' } }; $taskObj = JsonToDict $task; $result = @{ success = $true; task = Coalesce $taskObj['task'] ''; createdAt = Coalesce $taskObj['createdAt'] '' }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-SubmitWork { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $work = Coalesce $paramsObj['work'] ''; $summary = Coalesce $paramsObj['summary'] ''; $iteration = $paramsObj['iteration']; if (-not $work -or -not $summary -or -not $iteration) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'work, summary, and iteration are required' } }; Set-Work -SessionId $sessionId -Work $work -Summary $summary -Iteration $iteration; $status = Get-Status -SessionId $sessionId | JsonToDict; $result = @{ success = $true; message = "Work submitted for iteration $iteration"; status = $status }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-GetWork { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $work = Get-Work -SessionId $sessionId; if (-not $work) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No work submitted yet. Worker must submit work first.' } }; $workObj = JsonToDict $work; $result = @{ success = $true; work = Coalesce $workObj['work'] ''; summary = Coalesce $workObj['summary'] ''; iteration = Coalesce $workObj['iteration'] 0; submittedAt = Coalesce $workObj['submittedAt'] '' }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-SubmitReview { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $decision = Coalesce $paramsObj['decision'] ''; $feedback = Coalesce $paramsObj['feedback'] ''; $iteration = $paramsObj['iteration']; if (-not $decision -or -not $iteration) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'decision and iteration are required' } }; if ($decision -eq 'REVISE' -and -not $feedback) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Feedback is required when decision is REVISE' } }; Set-Review -SessionId $sessionId -Decision $decision -Feedback $feedback -Iteration $iteration; $status = Get-Status -SessionId $sessionId | JsonToDict; $result = @{ success = $true; message = "Review submitted: $decision"; decision = $decision; feedback = $feedback; status = $status }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-GetFeedback { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $reviewResult = Get-ReviewResult -SessionId $sessionId; $feedback = Get-Feedback -SessionId $sessionId; $status = Get-Status -SessionId $sessionId | JsonToDict; if (-not $reviewResult) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No review completed yet. Reviewer must submit review first.' } }; if ($reviewResult -eq 'SHIP') { $result = @{ success = $true; shipped = $true; message = 'Work approved! SHIPPED.'; status = $status }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }; $result = @{ success = $true; shipped = $false; feedback = $feedback; iteration = $status.currentIteration; status = $status }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-GetStatus { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $config = Get-Config -SessionId $sessionId; $maxIterations = 10; if ($config) { $configObj = JsonToDict $config; $maxIterations = Coalesce $configObj['maxIterations'] 10 }; $status = Get-Status -SessionId $sessionId -MaxIterations $maxIterations | JsonToDict; $result = @{ success = $true } + $status; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-GetConfig { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $config = Get-Config -SessionId $sessionId; if (-not $config) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No configuration found. Initialize the session first with ralph_loop_initialize.' } }; $configObj = JsonToDict $config; $validation = Test-CrossModel -SessionId $sessionId | JsonToDict; $result = @{ success = $true; config = @{ workerModel = Coalesce $configObj['workerModel'] ''; workerProvider = Coalesce $configObj['workerProvider'] ''; workerAgent = Coalesce $configObj['workerAgent'] ''; reviewerModel = Coalesce $configObj['reviewerModel'] ''; reviewerProvider = Coalesce $configObj['reviewerProvider'] ''; reviewerAgent = Coalesce $configObj['reviewerAgent'] ''; maxIterations = Coalesce $configObj['maxIterations'] 10; crossModelReviewEnforced = Coalesce $configObj['crossModelReviewEnforced'] $true; workGuidelines = Coalesce $configObj['workGuidelines'] ''; reviewGuidelines = Coalesce $configObj['reviewGuidelines'] ''; configuredAt = Coalesce $configObj['configuredAt'] '' }; crossModelReview = @{ enforced = Coalesce $configObj['crossModelReviewEnforced'] $true; valid = Coalesce $validation['valid'] $true; warning = Coalesce $validation['warning'] '' } }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-Reset { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; Reset-Session -SessionId $sessionId; $result = @{ success = $true; message = "Session `"$sessionId`" has been reset" }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-Block { param($Id, $Params); $paramsObj = JsonToDict $Params; $sessionId = Coalesce $paramsObj['sessionId'] 'default'; $reason = Coalesce $paramsObj['reason'] ''; if (-not $reason) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Reason is required for blocking' } }; Block-Iteration -SessionId $sessionId -Reason $reason; $result = @{ success = $true; message = 'Iteration blocked'; reason = $reason }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
-function Handle-Run { param($Id, $Params)
+function Handle-Initialize { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $task = Coalesce $paramsObj['task'] ''
+    $maxIterations = Coalesce $paramsObj['maxIterations'] 10
+    $workerModel = Coalesce $paramsObj['workerModel'] ''
+    $workerProvider = Coalesce $paramsObj['workerProvider'] ''
+    $workerAgent = Coalesce $paramsObj['workerAgent'] 'goose'
+    $reviewerModel = Coalesce $paramsObj['reviewerModel'] ''
+    $reviewerProvider = Coalesce $paramsObj['reviewerProvider'] ''
+    $reviewerAgent = Coalesce $paramsObj['reviewerAgent'] 'goose'
+    $monitorModel = Coalesce $paramsObj['monitorModel'] $script:MonitorModel
+    $monitorProvider = Coalesce $paramsObj['monitorProvider'] $script:MonitorProvider
+    $monitorAgent = Coalesce $paramsObj['monitorAgent'] $script:MonitorAgent
+    $crossModelEnforced = Coalesce $paramsObj['crossModelReviewEnforced'] $true
+    $workGuidelines = Coalesce $paramsObj['workGuidelines'] ''
+    $reviewGuidelines = Coalesce $paramsObj['reviewGuidelines'] ''
+    
+    if (-not $task) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Task is required' } 
+    }
+    
+    Set-Task -SessionId $sessionId -Task $task
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+    $validation = Test-CrossModel -SessionId $sessionId | JsonToDict
+    $status = Get-Status -SessionId $sessionId -MaxIterations $maxIterations | JsonToDict
+    $result = @{ 
+        success = $true
+        message = "Ralph Loop initialized for session `"$sessionId`""
+        status = $status
+        crossModelReview = @{ 
+            enforced = $crossModelEnforced
+            valid = Coalesce $validation['valid'] $true
+            warning = Coalesce $validation['warning'] '' 
+        } 
+    }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-GetTask { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $task = Get-Task -SessionId $sessionId
+    if (-not $task) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No task found. Initialize the session first with ralph_loop_initialize.' } 
+    }
+    $taskObj = JsonToDict $task
+    $result = @{ success = $true; task = Coalesce $taskObj['task'] ''; createdAt = Coalesce $taskObj['createdAt'] '' }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-SubmitWork { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $work = Coalesce $paramsObj['work'] ''
+    $summary = Coalesce $paramsObj['summary'] ''
+    $iteration = $paramsObj['iteration']
+    if (-not $work -or -not $summary -or -not $iteration) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'work, summary, and iteration are required' } 
+    }
+    Set-Work -SessionId $sessionId -Work $work -Summary $summary -Iteration $iteration
+    $status = Get-Status -SessionId $sessionId | JsonToDict
+    $result = @{ success = $true; message = "Work submitted for iteration $iteration"; status = $status }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-GetWork { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $work = Get-Work -SessionId $sessionId
+    if (-not $work) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No work submitted yet. Worker must submit work first.' } 
+    }
+    $workObj = JsonToDict $work
+    $result = @{ success = $true; work = Coalesce $workObj['work'] ''; summary = Coalesce $workObj['summary'] ''; iteration = Coalesce $workObj['iteration'] 0; submittedAt = Coalesce $workObj['submittedAt'] '' }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-SubmitReview { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $decision = Coalesce $paramsObj['decision'] ''
+    $feedback = Coalesce $paramsObj['feedback'] ''
+    $iteration = $paramsObj['iteration']
+    if (-not $decision -or -not $iteration) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'decision and iteration are required' } 
+    }
+    if ($decision -eq 'REVISE' -and -not $feedback) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Feedback is required when decision is REVISE' } 
+    }
+    Set-Review -SessionId $sessionId -Decision $decision -Feedback $feedback -Iteration $iteration
+    $status = Get-Status -SessionId $sessionId | JsonToDict
+    $result = @{ success = $true; message = "Review submitted: $decision"; decision = $decision; feedback = $feedback; status = $status }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-GetFeedback { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $reviewResult = Get-ReviewResult -SessionId $sessionId
+    $feedback = Get-Feedback -SessionId $sessionId
+    $status = Get-Status -SessionId $sessionId | JsonToDict
+    if (-not $reviewResult) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No review completed yet. Reviewer must submit review first.' } 
+    }
+    if ($reviewResult -eq 'SHIP') { 
+        $result = @{ success = $true; shipped = $true; message = 'Work approved! SHIPPED.'; status = $status }
+        return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+    }
+    $result = @{ success = $true; shipped = $false; feedback = $feedback; iteration = $status.currentIteration; status = $status }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-GetStatus { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $config = Get-Config -SessionId $sessionId
+    $maxIterations = 10
+    if ($config) { 
+        $configObj = JsonToDict $config
+        $maxIterations = Coalesce $configObj['maxIterations'] 10 
+    }
+    $status = Get-Status -SessionId $sessionId -MaxIterations $maxIterations | JsonToDict
+    $result = @{ success = $true } + $status
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-GetConfig { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $config = Get-Config -SessionId $sessionId
+    if (-not $config) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'No configuration found. Initialize the session first with ralph_loop_initialize.' } 
+    }
+    $configObj = JsonToDict $config
+    $validation = Test-CrossModel -SessionId $sessionId | JsonToDict
+    $result = @{ 
+        success = $true
+        config = @{ 
+            workerModel = Coalesce $configObj['workerModel'] ''
+            workerProvider = Coalesce $configObj['workerProvider'] ''
+            workerAgent = Coalesce $configObj['workerAgent'] ''
+            reviewerModel = Coalesce $configObj['reviewerModel'] ''
+            reviewerProvider = Coalesce $configObj['reviewerProvider'] ''
+            reviewerAgent = Coalesce $configObj['reviewerAgent'] ''
+            monitorModel = Coalesce $configObj['monitorModel'] ''
+            monitorProvider = Coalesce $configObj['monitorProvider'] ''
+            monitorAgent = Coalesce $configObj['monitorAgent'] ''
+            maxIterations = Coalesce $configObj['maxIterations'] 10
+            crossModelReviewEnforced = Coalesce $configObj['crossModelReviewEnforced'] $true
+            workGuidelines = Coalesce $configObj['workGuidelines'] ''
+            reviewGuidelines = Coalesce $configObj['reviewGuidelines'] ''
+            configuredAt = Coalesce $configObj['configuredAt'] '' 
+        }
+        crossModelReview = @{ 
+            enforced = Coalesce $configObj['crossModelReviewEnforced'] $true
+            valid = Coalesce $validation['valid'] $true
+            warning = Coalesce $validation['warning'] '' 
+        } 
+    }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-Reset { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    Reset-Session -SessionId $sessionId
+    $result = @{ success = $true; message = "Session `"$sessionId`" has been reset" }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-Block { 
+    param($Id, $Params)
+    $paramsObj = JsonToDict $Params
+    $sessionId = Coalesce $paramsObj['sessionId'] 'default'
+    $reason = Coalesce $paramsObj['reason'] ''
+    if (-not $reason) { 
+        return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Reason is required for blocking' } 
+    }
+    Block-Iteration -SessionId $sessionId -Reason $reason
+    $result = @{ success = $true; message = 'Iteration blocked'; reason = $reason }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
+
+function Handle-Run { 
+    param($Id, $Params)
     $paramsObj = JsonToDict $Params
     $sessionId = Coalesce $paramsObj['sessionId'] 'default'
     $task = Coalesce $paramsObj['task'] ''
@@ -423,7 +829,7 @@ function Handle-Run { param($Id, $Params)
     if (-not $workerModel -or -not $workerProvider -or -not $reviewerModel -or -not $reviewerProvider) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'workerModel, workerProvider, reviewerModel, and reviewerProvider are required' } }
 
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
 
     $feedback = ''
 
@@ -472,7 +878,163 @@ function Handle-Run { param($Id, $Params)
     return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10)
 }
 
-function Handle-ListMethods { param($Id); $methods = @('ralph_loop_initialize','ralph_loop_get_task','ralph_loop_submit_work','ralph_loop_get_work','ralph_loop_submit_review','ralph_loop_get_feedback','ralph_loop_get_status','ralph_loop_get_config','ralph_loop_reset','ralph_loop_block','ralph_loop_run'); $result = @{ methods = $methods }; return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) }
+function Handle-ListTools { 
+    param($Id)
+    $tools = @(
+        @{
+            name = 'ralph_loop_initialize'
+            description = 'Initialize a new Ralph Loop session with a task, model configuration, and guidelines'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Unique session identifier (default: 'default')" }
+                    task = @{ type = 'string'; description = 'The task or feature description for the worker to implement' }
+                    maxIterations = @{ type = 'integer'; description = 'Maximum number of iterations (-1 for unlimited, default: 10)' }
+                    workerModel = @{ type = 'string'; description = "Worker LLM model name (e.g., 'claude-3-5-sonnet')" }
+                    workerProvider = @{ type = 'string'; description = 'Worker provider (anthropic, openai, google, copilot, goose)' }
+                    workerAgent = @{ type = 'string'; description = "Worker agent CLI (goose, claude, openai, gemini, copilot, default: 'goose')" }
+                    reviewerModel = @{ type = 'string'; description = "Reviewer LLM model name (e.g., 'gpt-4o')" }
+                    reviewerProvider = @{ type = 'string'; description = 'Reviewer provider (anthropic, openai, google, copilot, goose)' }
+                    reviewerAgent = @{ type = 'string'; description = "Reviewer agent CLI (goose, claude, openai, gemini, copilot, default: 'goose')" }
+                    monitorModel = @{ type = 'string'; description = 'Monitoring agent model name (fallback supervisor)' }
+                    monitorProvider = @{ type = 'string'; description = 'Monitoring agent provider (anthropic, openai, google, copilot, goose)' }
+                    monitorAgent = @{ type = 'string'; description = "Monitoring agent CLI (goose, claude, openai, gemini, copilot, default: 'goose')" }
+                    crossModelReviewEnforced = @{ type = 'boolean'; description = 'Enforce cross-model review validation between worker and reviewer (default: true)' }
+                    workGuidelines = @{ type = 'string'; description = 'Path to work recipe or guidelines file' }
+                    reviewGuidelines = @{ type = 'string'; description = 'Path to review recipe or guidelines file' }
+                }
+                required = @('task')
+            }
+        },
+        @{
+            name = 'ralph_loop_get_task'
+            description = 'Get the current task for the worker phase'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                }
+            }
+        },
+        @{
+            name = 'ralph_loop_submit_work'
+            description = 'Submit work results and summary from worker phase'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                    work = @{ type = 'string'; description = 'Complete work output / implementation' }
+                    summary = @{ type = 'string'; description = 'Summary of changes made' }
+                    iteration = @{ type = 'integer'; description = 'Current iteration number' }
+                }
+                required = @('work', 'summary', 'iteration')
+            }
+        },
+        @{
+            name = 'ralph_loop_get_work'
+            description = "Get worker's submitted work for reviewer phase"
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                }
+            }
+        },
+        @{
+            name = 'ralph_loop_submit_review'
+            description = 'Submit review decision (SHIP or REVISE) with feedback'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                    decision = @{ type = 'string'; enum = @('SHIP', 'REVISE'); description = 'Review decision: SHIP to approve, REVISE to request changes' }
+                    feedback = @{ type = 'string'; description = 'Actionable feedback for revision (required if decision is REVISE)' }
+                    iteration = @{ type = 'integer'; description = 'Current iteration number' }
+                }
+                required = @('decision', 'iteration')
+            }
+        },
+        @{
+            name = 'ralph_loop_get_feedback'
+            description = 'Get reviewer feedback for next iteration'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                }
+            }
+        },
+        @{
+            name = 'ralph_loop_get_status'
+            description = 'Get current session status, phase, iteration, and configuration'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                }
+            }
+        },
+        @{
+            name = 'ralph_loop_get_config'
+            description = 'Get worker, reviewer, and monitor configuration for a session'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                }
+            }
+        },
+        @{
+            name = 'ralph_loop_reset'
+            description = 'Reset and clear all state and history for a session'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                }
+            }
+        },
+        @{
+            name = 'ralph_loop_block'
+            description = 'Block the current iteration with a reason'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                    reason = @{ type = 'string'; description = 'Reason why the loop cannot proceed' }
+                }
+                required = @('reason')
+            }
+        },
+        @{
+            name = 'ralph_loop_run'
+            description = 'Run complete automated Ralph Loop (initialization -> orchestration -> execution -> state management)'
+            inputSchema = @{
+                type = 'object'
+                properties = @{
+                    sessionId = @{ type = 'string'; description = "Session ID (default: 'default')" }
+                    task = @{ type = 'string'; description = 'Task description to accomplish' }
+                    maxIterations = @{ type = 'integer'; description = 'Maximum number of iterations (-1 for unlimited, default: 10)' }
+                    workerModel = @{ type = 'string'; description = 'Worker model name' }
+                    workerProvider = @{ type = 'string'; description = 'Worker provider (anthropic, openai, google, copilot, goose)' }
+                    workerAgent = @{ type = 'string'; description = "Worker agent CLI (goose, claude, openai, gemini, copilot, default: 'goose')" }
+                    reviewerModel = @{ type = 'string'; description = 'Reviewer model name' }
+                    reviewerProvider = @{ type = 'string'; description = 'Reviewer provider (anthropic, openai, google, copilot, goose)' }
+                    reviewerAgent = @{ type = 'string'; description = "Reviewer agent CLI (goose, claude, openai, gemini, copilot, default: 'goose')" }
+                    monitorModel = @{ type = 'string'; description = 'Monitor model name' }
+                    monitorProvider = @{ type = 'string'; description = 'Monitor provider' }
+                    monitorAgent = @{ type = 'string'; description = "Monitor agent CLI (goose, claude, openai, gemini, copilot, default: 'goose')" }
+                    crossModelReviewEnforced = @{ type = 'boolean'; description = 'Enforce cross-model review validation (default: true)' }
+                    workGuidelines = @{ type = 'string'; description = 'Path to work recipe or guidelines file' }
+                    reviewGuidelines = @{ type = 'string'; description = 'Path to review recipe or guidelines file' }
+                }
+                required = @('task', 'workerModel', 'workerProvider', 'reviewerModel', 'reviewerProvider')
+            }
+        }
+    )
+    $result = @{ tools = $tools }
+    return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10) 
+}
 
 # =============================================================================
 # MAIN ENTRY POINT
@@ -502,7 +1064,7 @@ if ($args.Count -gt 0) {
 
             switch ($method) {
                 'initialize' { $resp = @{ jsonrpc = '2.0'; id = $id; result = @{ protocolVersion = '2024-11-05'; capabilities = @{ tools = @{} }; serverInfo = @{ name = 'ralph-loop-runner'; version = '1.0.0' } } }; Write-Output ($resp | ConvertTo-Json -Compress -Depth 10) }
-                'tools/list' { Write-Output (Handle-ListMethods -Id $id) }
+                'tools/list' { Write-Output (Handle-ListTools -Id $id) }
                 'tools/call' {
                     $toolName = if ($params.ContainsKey('name')) { $params['name'] } else { '' }
                     $toolArgs = if ($params.ContainsKey('arguments')) { $params['arguments'] } else { @{} }

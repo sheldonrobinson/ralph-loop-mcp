@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # ralph-loop-runner - Bash Implementation (Unified: MCP Server + CLI Orchestration)
 # Cross-platform implementation of the Ralph Loop iterative development technique
 # For Linux/macOS
@@ -23,6 +23,9 @@ REVIEWER_AGENT="${RALPH_REVIEWER_AGENT:-goose}"
 MAX_ITERATIONS="${RALPH_MAX_ITERATIONS:-10}"
 WORK_GUIDELINES="${RALPH_WORK_GUIDELINES:-${RALPH_RECIPE_DIR}/ralph-work.yaml}"
 REVIEW_GUIDELINES="${RALPH_REVIEW_GUIDELINES:-${RALPH_RECIPE_DIR}/ralph-review.yaml}"
+MONITOR_MODEL="${RALPH_MONITOR_MODEL:-}"
+MONITOR_PROVIDER="${RALPH_MONITOR_PROVIDER:-}"
+MONITOR_AGENT="${RALPH_MONITOR_AGENT:-goose}"
 
 # CLI argument defaults (can be overridden by command line)
 CLI_TASK=""
@@ -89,8 +92,11 @@ set_config() {
     local cross_model_enforced="${7:-true}"
     local worker_agent="${8:-goose}"
     local reviewer_agent="${9:-goose}"
-    local work_guidelines="${10}"
-    local review_guidelines="${11}"
+    local work_guidelines="${10:-}"
+    local review_guidelines="${11:-}"
+    local monitor_model="${12:-}"
+    local monitor_provider="${13:-}"
+    local monitor_agent="${14:-goose}"
     
     ensure_state_dir "${session_id}"
     local config_file="$(get_state_file "${session_id}" "config.json")"
@@ -103,6 +109,9 @@ set_config() {
   "reviewerModel": $(json_escape "${reviewer_model}"),
   "reviewerProvider": $(json_escape "${reviewer_provider}"),
   "reviewerAgent": $(json_escape "${reviewer_agent}"),
+  "monitorModel": $(json_escape "${monitor_model}"),
+  "monitorProvider": $(json_escape "${monitor_provider}"),
+  "monitorAgent": $(json_escape "${monitor_agent}"),
   "maxIterations": ${max_iterations},
   "crossModelReviewEnforced": ${cross_model_enforced},
   "workGuidelines": $(json_escape "${work_guidelines}"),
@@ -179,7 +188,7 @@ get_task() {
 }
 
 # =============================================================================
-# WORK MANAGEMENT
+# WORK MANAGEMENT & ITERATION HISTORY
 # =============================================================================
 set_work() {
     local session_id="${1}"
@@ -197,6 +206,15 @@ set_work() {
 }
 EOF
     echo '{"ok":true}' > "$(get_state_file "${session_id}" "work-complete.txt")"
+
+    # Persist iteration history
+    local hist_dir="$(get_state_dir "${session_id}")/history/iteration_${iteration}"
+    mkdir -p "${hist_dir}"
+    cp "${work_file}" "${hist_dir}/work.json"
+    local work_out="$(get_state_file "${session_id}" "work.out")"
+    if [[ -f "${work_out}" ]]; then
+        cp "${work_out}" "${hist_dir}/work.out"
+    fi
 }
 
 get_work() {
@@ -210,7 +228,7 @@ get_work() {
 }
 
 # =============================================================================
-# REVIEW MANAGEMENT
+# REVIEW MANAGEMENT & ITERATION HISTORY
 # =============================================================================
 set_review() {
     local session_id="${1}"
@@ -230,6 +248,15 @@ EOF
     echo "{\"decision\":$(json_escape "${decision}")}" > "$(get_state_file "${session_id}" "review-result.txt")"
     echo "{\"feedback\":$(json_escape "${feedback}")}" > "$(get_state_file "${session_id}" "review-feedback.txt")"
     
+    # Persist iteration history
+    local hist_dir="$(get_state_dir "${session_id}")/history/iteration_${iteration}"
+    mkdir -p "${hist_dir}"
+    cp "${review_file}" "${hist_dir}/review.json"
+    local review_out="$(get_state_file "${session_id}" "review.out")"
+    if [[ -f "${review_out}" ]]; then
+        cp "${review_out}" "${hist_dir}/review.out"
+    fi
+
     if [[ "${decision}" == "REVISE" ]]; then
         cleanup_for_next_iteration "${session_id}"
     fi
@@ -330,6 +357,7 @@ get_status() {
     fi
     
     local worker_model="" worker_provider="" worker_agent="" reviewer_model="" reviewer_provider="" reviewer_agent=""
+    local monitor_model="" monitor_provider="" monitor_agent=""
     local cross_model_enforced="" cross_model_valid="" cross_model_warning="" work_guidelines="" review_guidelines=""
     if [[ -n "${config}" ]]; then
         worker_model=$(echo "${config}" | jq -r '.workerModel // empty')
@@ -338,6 +366,9 @@ get_status() {
         reviewer_model=$(echo "${config}" | jq -r '.reviewerModel // empty')
         reviewer_provider=$(echo "${config}" | jq -r '.reviewerProvider // empty')
         reviewer_agent=$(echo "${config}" | jq -r '.reviewerAgent // empty')
+        monitor_model=$(echo "${config}" | jq -r '.monitorModel // empty')
+        monitor_provider=$(echo "${config}" | jq -r '.monitorProvider // empty')
+        monitor_agent=$(echo "${config}" | jq -r '.monitorAgent // empty')
         cross_model_enforced=$(echo "${config}" | jq -r '.crossModelReviewEnforced // true')
         cross_model_valid=$(echo "${cross_model_validation}" | jq -r '.valid // true')
         cross_model_warning=$(echo "${cross_model_validation}" | jq -r '.warning // empty')
@@ -363,6 +394,9 @@ get_status() {
         --arg reviewerModel "${reviewer_model}" \
         --arg reviewerProvider "${reviewer_provider}" \
         --arg reviewerAgent "${reviewer_agent}" \
+        --arg monitorModel "${monitor_model}" \
+        --arg monitorProvider "${monitor_provider}" \
+        --arg monitorAgent "${monitor_agent}" \
         --argjson crossModelEnforced "${cross_model_enforced}" \
         --argjson crossModelValid "${cross_model_valid}" \
         --arg crossModelWarning "${cross_model_warning}" \
@@ -385,6 +419,9 @@ get_status() {
             reviewerModel: (if $reviewerModel == "" then null else $reviewerModel end),
             reviewerProvider: (if $reviewerProvider == "" then null else $reviewerProvider end),
             reviewerAgent: (if $reviewerAgent == "" then null else $reviewerAgent end),
+            monitorModel: (if $monitorModel == "" then null else $monitorModel end),
+            monitorProvider: (if $monitorProvider == "" then null else $monitorProvider end),
+            monitorAgent: (if $monitorAgent == "" then null else $monitorAgent end),
             crossModelReviewEnforced: $crossModelEnforced,
             crossModelReviewValid: $crossModelValid,
             crossModelReviewWarning: (if $crossModelWarning == "" then null else $crossModelWarning end),
@@ -402,6 +439,8 @@ cleanup_for_next_iteration() {
     rm -f "$(get_state_file "${session_id}" "review-feedback.txt")"
     rm -f "$(get_state_file "${session_id}" "work.json")"
     rm -f "$(get_state_file "${session_id}" "review.json")"
+    rm -f "$(get_state_file "${session_id}" "work.out")"
+    rm -f "$(get_state_file "${session_id}" "review.out")"
 }
 
 reset_session() {
@@ -421,7 +460,7 @@ block_iteration() {
 }
 
 # =============================================================================
-# ORCHESTRATION FUNCTIONS (CLI mode)
+# ORCHESTRATION FUNCTIONS (CLI mode & Monitoring Agent)
 # =============================================================================
 
 call_llm_worker() {
@@ -433,6 +472,7 @@ call_llm_worker() {
     local worker_provider="$6"
     local worker_agent="$7"
     local work_guidelines="$8"
+    local is_existing="${9:-false}"
     
     local prompt="You are the WORKER in a Ralph Loop iteration ${iteration}.
     
@@ -456,7 +496,7 @@ WORK:
 SUMMARY:
 [brief summary of what you did]"
     
-    case "${worker_provider}" in
+    case "${worker_agent}" in
         anthropic)
             echo "${prompt}" | claude --model "${worker_model}" --print 2>/dev/null
             ;;
@@ -467,20 +507,33 @@ SUMMARY:
             echo "${prompt}" | gemini --model "${worker_model}" --format=text 2>/dev/null
             ;;
         copilot)
-            # GitHub Copilot CLI
             copilot -p --allow-all-tools "${prompt}" 2>/dev/null
             ;;
         goose)
+            local goose_args=("run")
             if [[ -n "${work_guidelines}" && -f "${work_guidelines}" ]]; then
-                GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
-                goose run --recipe "${work_guidelines}" --session-id "${session_id}" --text "${prompt}" 2>/dev/null
-            else
-                GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
-                goose run --session-id "${session_id}" --text "${prompt}" 2>/dev/null
+                goose_args+=("--recipe" "${work_guidelines}")
             fi
+            local params_str="task=${task}"
+            if [[ -n "${feedback}" ]]; then
+                params_str+=" feedback=${feedback}"
+            fi
+            goose_args+=("--params" "${params_str}")
+            if [[ -n "${session_id}" ]]; then
+                if [[ "${is_existing}" == "true" ]]; then
+                    goose_args+=("--resume")
+                fi
+                goose_args+=("--name" "${session_id}")
+            else
+                goose_args+=("--no-session")
+            fi
+            goose_args+=("--text" "${prompt}")
+            
+            GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
+            goose "${goose_args[@]}" 2>/dev/null
             ;;
         *)
-            echo "Error: Unknown provider ${worker_provider}" >&2
+            echo "Error: Unknown agent ${worker_agent}" >&2
             return 1
             ;;
     esac
@@ -496,6 +549,7 @@ call_llm_reviewer() {
     local reviewer_provider="$7"
     local reviewer_agent="$8"
     local review_guidelines="$9"
+    local is_existing="${10:-false}"
     
     local prompt="You are the REVIEWER in a Ralph Loop iteration ${iteration}.
     
@@ -513,7 +567,7 @@ Output format:
 DECISION: SHIP or REVISE
 FEEDBACK: [your feedback, or empty if SHIP]"
     
-    case "${reviewer_provider}" in
+    case "${reviewer_agent}" in
         anthropic)
             echo "${prompt}" | claude --model "${reviewer_model}" --print 2>/dev/null
             ;;
@@ -524,27 +578,72 @@ FEEDBACK: [your feedback, or empty if SHIP]"
             echo "${prompt}" | gemini --model "${reviewer_model}" --format=text 2>/dev/null
             ;;
         copilot)
-            # GitHub Copilot CLI
             copilot -p --allow-all-tools "${prompt}" 2>/dev/null
             ;;
         goose)
+            local goose_args=("run")
             if [[ -n "${review_guidelines}" && -f "${review_guidelines}" ]]; then
-                GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
-                goose run --recipe "${review_guidelines}" --session-id "${session_id}" --text "${prompt}" 2>/dev/null
-            else
-                GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
-                goose run --session-id "${session_id}" --text "${prompt}" 2>/dev/null
+                goose_args+=("--recipe" "${review_guidelines}")
             fi
+            goose_args+=("--params" "task=${task} work=${work} summary=${summary}")
+            if [[ -n "${session_id}" ]]; then
+                if [[ "${is_existing}" == "true" ]]; then
+                    goose_args+=("--resume")
+                fi
+                goose_args+=("--name" "${session_id}")
+            else
+                goose_args+=("--no-session")
+            fi
+            goose_args+=("--text" "${prompt}")
+            
+            GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
+            goose "${goose_args[@]}" 2>/dev/null
             ;;
         *)
-            echo "Error: Unknown provider ${reviewer_provider}" >&2
+            echo "Error: Unknown agent ${reviewer_agent}" >&2
             return 1
+            ;;
+    esac
+}
+
+call_llm_monitor() {
+    local prompt="$1"
+    local monitor_model="${2:-${MONITOR_MODEL}}"
+    local monitor_provider="${3:-${MONITOR_PROVIDER}}"
+    local monitor_agent="${4:-${MONITOR_AGENT}}"
+    
+    # Fall back to worker settings if monitor not configured
+    if [[ -z "${monitor_model}" ]]; then monitor_model="${WORKER_MODEL}"; fi
+    if [[ -z "${monitor_provider}" ]]; then monitor_provider="${WORKER_PROVIDER}"; fi
+    if [[ -z "${monitor_agent}" ]]; then monitor_agent="${WORKER_AGENT}"; fi
+    
+    case "${monitor_agent}" in
+        anthropic)
+            echo "${prompt}" | claude --model "${monitor_model}" --print 2>/dev/null
+            ;;
+        openai)
+            echo "${prompt}" | openai chat --model "${monitor_model}" --no-stream 2>/dev/null
+            ;;
+        google)
+            echo "${prompt}" | gemini --model "${monitor_model}" --format=text 2>/dev/null
+            ;;
+        goose)
+            GOOSE_MODEL="${monitor_model}" GOOSE_PROVIDER="${monitor_provider}" \
+            goose run --no-session --text "${prompt}" 2>/dev/null
+            ;;
+        *)
+            echo "${prompt}" | openai chat --model "${monitor_model}" --no-stream 2>/dev/null
             ;;
     esac
 }
 
 parse_worker_output() {
     local output="$1"
+    local monitor_model="${2:-}"
+    local monitor_provider="${3:-}"
+    local monitor_agent="${4:-}"
+    local output_file="${5:-}"
+    
     local work=""
     local summary=""
     
@@ -555,20 +654,116 @@ parse_worker_output() {
         summary=$(echo "${output}" | sed -n '/^SUMMARY:/,$p' | sed '1d' | sed '/^$/d')
     fi
     
+    # Regex failed -- try Monitor LLM fallback
+    if [[ -z "${work}" || -z "${summary}" ]]; then
+        echo "  Regex parsing failed for worker output, consulting Monitor LLM..." >&2
+        local monitor_prompt
+        if [[ "${monitor_agent}" == "goose" && -n "${output_file}" && -f "${output_file}" ]]; then
+            monitor_prompt="Read the file at '${output_file}' then extract the WORK and SUMMARY sections from its content.
+
+If the agent created or modified files, include the file paths and key content in WORK.
+Summarize what was accomplished in SUMMARY.
+
+Output format:
+WORK:
+[extracted work content]
+
+SUMMARY:
+[one-line summary]"
+        else
+            monitor_prompt="Extract the WORK and SUMMARY sections from the following raw agent output.
+
+If the agent created or modified files, include the file paths and key content in WORK.
+Summarize what was accomplished in SUMMARY.
+
+Output format:
+WORK:
+[extracted work content]
+
+SUMMARY:
+[one-line summary]
+
+---
+${output}"
+        fi
+        
+        local monitor_response
+        monitor_response=$(call_llm_monitor "${monitor_prompt}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
+        if [[ -n "${monitor_response}" ]]; then
+            if [[ "${monitor_response}" == *"WORK:"* ]]; then
+                work=$(echo "${monitor_response}" | sed -n '/^WORK:/,/^SUMMARY:/p' | sed '1d;$d' | sed '/^$/d')
+            fi
+            if [[ "${monitor_response}" == *"SUMMARY:"* ]]; then
+                summary=$(echo "${monitor_response}" | sed -n '/^SUMMARY:/,$p' | sed '1d' | sed '/^$/d')
+            fi
+        fi
+        
+        if [[ -n "${work}" || -n "${summary}" ]]; then
+            echo "  Monitor LLM parsed successfully." >&2
+        else
+            echo "  Monitor LLM also could not parse the output." >&2
+        fi
+    fi
+    
     echo "${work}|${summary}"
 }
 
 parse_reviewer_output() {
     local output="$1"
+    local monitor_model="${2:-}"
+    local monitor_provider="${3:-}"
+    local monitor_agent="${4:-}"
+    local output_file="${5:-}"
+    
     local decision=""
     local feedback=""
     
     if [[ "${output}" == *"DECISION:"* ]]; then
-        decision=$(echo "${output}" | grep -i "^DECISION:" | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+        decision=$(echo "${output}" | grep -i "^DECISION:" | head -n 1 | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
         decision=$(echo "${decision}" | tr '[:lower:]' '[:upper:]')
     fi
     if [[ "${output}" == *"FEEDBACK:"* ]]; then
         feedback=$(echo "${output}" | sed -n '/^FEEDBACK:/,$p' | sed '1d' | sed '/^$/d')
+    fi
+    
+    # Regex failed -- try Monitor LLM fallback
+    if [[ "${decision}" != "SHIP" && "${decision}" != "REVISE" ]]; then
+        echo "  Regex parsing failed for reviewer output, consulting Monitor LLM..." >&2
+        local monitor_prompt
+        if [[ "${monitor_agent}" == "goose" && -n "${output_file}" && -f "${output_file}" ]]; then
+            monitor_prompt="Read the file at '${output_file}' then extract the DECISION (SHIP or REVISE) and FEEDBACK from its content.
+
+Output format:
+DECISION: SHIP or REVISE
+FEEDBACK: [the review feedback]"
+        else
+            monitor_prompt="Extract the DECISION (SHIP or REVISE) and FEEDBACK from the following raw agent output.
+
+Output format:
+DECISION: SHIP or REVISE
+FEEDBACK: [the review feedback]
+
+---
+${output}"
+        fi
+        
+        local monitor_response
+        monitor_response=$(call_llm_monitor "${monitor_prompt}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
+        if [[ -n "${monitor_response}" ]]; then
+            if [[ "${monitor_response}" == *"DECISION:"* ]]; then
+                decision=$(echo "${monitor_response}" | grep -i "^DECISION:" | head -n 1 | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+                decision=$(echo "${decision}" | tr '[:lower:]' '[:upper:]')
+            fi
+            if [[ "${monitor_response}" == *"FEEDBACK:"* ]]; then
+                feedback=$(echo "${monitor_response}" | sed -n '/^FEEDBACK:/,$p' | sed '1d' | sed '/^$/d')
+            fi
+        fi
+        
+        if [[ "${decision}" == "SHIP" || "${decision}" == "REVISE" ]]; then
+            echo "  Monitor LLM parsed successfully." >&2
+        else
+            echo "  Monitor LLM also could not parse the output." >&2
+        fi
     fi
     
     echo "${decision}|${feedback}"
@@ -586,6 +781,9 @@ run_cli() {
     local max_iterations="${MAX_ITERATIONS}"
     local work_guidelines="${WORK_GUIDELINES}"
     local review_guidelines="${REVIEW_GUIDELINES}"
+    local monitor_model="${MONITOR_MODEL}"
+    local monitor_provider="${MONITOR_PROVIDER}"
+    local monitor_agent="${MONITOR_AGENT}"
     
     # Get task from file or argument
     local task
@@ -606,6 +804,9 @@ run_cli() {
         echo "  --reviewer-model MODEL       Reviewer model (default: \$RALPH_REVIEWER_MODEL)"
         echo "  --reviewer-provider PROVIDER Reviewer provider (default: \$RALPH_REVIEWER_PROVIDER)"
         echo "  --reviewer-agent AGENT       Reviewer agent (default: \$RALPH_REVIEWER_AGENT)"
+        echo "  --monitor-model MODEL        Monitor model (default: \$RALPH_MONITOR_MODEL)"
+        echo "  --monitor-provider PROVIDER  Monitor provider (default: \$RALPH_MONITOR_PROVIDER)"
+        echo "  --monitor-agent AGENT        Monitor agent (default: \$RALPH_MONITOR_AGENT)"
         echo "  --max-iterations N           Max iterations, -1 for infinite (default: \$RALPH_MAX_ITERATIONS)"
         echo "  --work-guidelines FILE       Work guidelines/recipe file (default: \$RALPH_WORK_GUIDELINES)"
         echo "  --review-guidelines FILE     Review guidelines/recipe file (default: \$RALPH_REVIEW_GUIDELINES)"
@@ -638,6 +839,18 @@ run_cli() {
                 ;;
             --reviewer-agent)
                 reviewer_agent="${3}"
+                shift 2
+                ;;
+            --monitor-model)
+                monitor_model="${3}"
+                shift 2
+                ;;
+            --monitor-provider)
+                monitor_provider="${3}"
+                shift 2
+                ;;
+            --monitor-agent)
+                monitor_agent="${3}"
                 shift 2
                 ;;
             --max-iterations)
@@ -706,6 +919,9 @@ run_cli() {
     echo "Task: ${task}"
     echo "Worker: ${worker_model} (${worker_provider}) via ${worker_agent}"
     echo "Reviewer: ${reviewer_model} (${reviewer_provider}) via ${reviewer_agent}"
+    if [[ -n "${monitor_model}" ]]; then
+        echo "Monitor: ${monitor_model} (${monitor_provider}) via ${monitor_agent}"
+    fi
     if [[ "${max_iterations}" -eq -1 ]]; then
         echo "Max Iterations: unlimited"
     else
@@ -715,7 +931,7 @@ run_cli() {
     
     # Initialize session
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
     
     local feedback=""
     local iteration=1
@@ -730,29 +946,37 @@ run_cli() {
     
     for ((i=1; i<=max_iter; i++)); do
         iteration=$i
-        echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+        echo "======================================================================"
         echo "  Iteration ${iteration} / ${max_iterations}"
-        echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+        echo "======================================================================"
         
         # WORK PHASE
-        echo "â–¶ WORK PHASE"
+        echo "▶ WORK PHASE"
         echo "Worker: ${worker_model} (${worker_provider}) via ${worker_agent}"
         
+        local is_existing="false"
+        if [[ -n "${CLI_SESSION_ID}" || ${iteration} -gt 1 ]]; then
+            is_existing="true"
+        fi
+
         local worker_output
-        worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}")
+        worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
         
         if [[ -z "${worker_output}" ]]; then
-            echo "âœ— WORK PHASE FAILED - No output from worker" >&2
+            echo "✗ WORK PHASE FAILED - No output from worker" >&2
             exit 1
         fi
         
+        local work_out_file="$(get_state_file "${session_id}" "work.out")"
+        echo "${worker_output}" > "${work_out_file}"
+
         local parsed work summary
-        parsed=$(parse_worker_output "${worker_output}")
+        parsed=$(parse_worker_output "${worker_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${work_out_file}")
         work=$(echo "${parsed}" | cut -d'|' -f1)
         summary=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ -z "${work}" || -z "${summary}" ]]; then
-            echo "âœ— WORK PHASE FAILED - Could not parse output" >&2
+            echo "✗ WORK PHASE FAILED - Could not parse output" >&2
             exit 1
         fi
         
@@ -761,23 +985,26 @@ run_cli() {
         echo ""
         
         # REVIEW PHASE
-        echo "â–¶ REVIEW PHASE"
+        echo "▶ REVIEW PHASE"
         echo "Reviewer: ${reviewer_model} (${reviewer_provider}) via ${reviewer_agent}"
         
         local reviewer_output
-        reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}")
+        reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
         
         if [[ -z "${reviewer_output}" ]]; then
-            echo "âœ— REVIEW PHASE FAILED - No output from reviewer" >&2
+            echo "✗ REVIEW PHASE FAILED - No output from reviewer" >&2
             exit 1
         fi
         
-        parsed=$(parse_reviewer_output "${reviewer_output}")
+        local review_out_file="$(get_state_file "${session_id}" "review.out")"
+        echo "${reviewer_output}" > "${review_out_file}"
+
+        parsed=$(parse_reviewer_output "${reviewer_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${review_out_file}")
         local decision=$(echo "${parsed}" | cut -d'|' -f1)
         feedback=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ "${decision}" != "SHIP" && "${decision}" != "REVISE" ]]; then
-            echo "âœ— REVIEW PHASE FAILED - Invalid decision: ${decision}" >&2
+            echo "✗ REVIEW PHASE FAILED - Invalid decision: ${decision}" >&2
             exit 1
         fi
         
@@ -785,21 +1012,21 @@ run_cli() {
         
         if [[ "${decision}" == "SHIP" ]]; then
             echo ""
-            echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
-            echo "  âœ“ SHIPPED after ${iteration} iteration(s)"
-            echo "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+            echo "======================================================================"
+            echo "  ✓ SHIPPED after ${iteration} iteration(s)"
+            echo "======================================================================"
             echo "Session: ${session_id}"
             echo "Complete: $(date)"
             exit 0
         else
             echo ""
-            echo "â†» REVISE - Feedback for next iteration:"
+            echo "↪ REVISE - Feedback for next iteration:"
             echo "${feedback}"
             echo ""
         fi
     done
     
-    echo "âœ— Max iterations (${max_iterations}) reached" >&2
+    echo "✗ Max iterations (${max_iterations}) reached" >&2
     exit 1
 }
 
@@ -810,7 +1037,9 @@ run_cli() {
 handle_initialize() {
     local id="${1}"
     local params="${2}"
-    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines
+    local session_id task max_iterations worker_model worker_provider worker_agent
+    local reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent
+    local cross_model_enforced work_guidelines review_guidelines
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
@@ -821,6 +1050,9 @@ handle_initialize() {
     reviewer_model=$(echo "${params}" | jq -r '.reviewerModel // empty')
     reviewer_provider=$(echo "${params}" | jq -r '.reviewerProvider // empty')
     reviewer_agent=$(echo "${params}" | jq -r '.reviewerAgent // "goose"')
+    monitor_model=$(echo "${params}" | jq -r '.monitorModel // env.RALPH_MONITOR_MODEL // empty')
+    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // env.RALPH_MONITOR_PROVIDER // empty')
+    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // env.RALPH_MONITOR_AGENT // "goose"')
     cross_model_enforced=$(echo "${params}" | jq -r '.crossModelReviewEnforced // true')
     work_guidelines=$(echo "${params}" | jq -r '.workGuidelines // empty')
     review_guidelines=$(echo "${params}" | jq -r '.reviewGuidelines // empty')
@@ -831,7 +1063,7 @@ handle_initialize() {
     fi
     
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
     
     local validation
     validation=$(validate_cross_model "${session_id}")
@@ -1027,7 +1259,7 @@ handle_get_config() {
     result=$(jq -n \
         --argjson config "${config}" \
         --argjson validation "${validation}" \
-        '{success: true, config: {workerModel: $config.workerModel, workerProvider: $config.workerProvider, workerAgent: $config.workerAgent, reviewerModel: $config.reviewerModel, reviewerProvider: $config.reviewerProvider, reviewerAgent: $config.reviewerAgent, maxIterations: $config.maxIterations, crossModelReviewEnforced: $config.crossModelReviewEnforced, workGuidelines: $config.workGuidelines, reviewGuidelines: $config.reviewGuidelines, configuredAt: $config.configuredAt}, crossModelReview: {enforced: $config.crossModelReviewEnforced, valid: $validation.valid, warning: $validation.warning}}')
+        '{success: true, config: {workerModel: $config.workerModel, workerProvider: $config.workerProvider, workerAgent: $config.workerAgent, reviewerModel: $config.reviewerModel, reviewerProvider: $config.reviewerProvider, reviewerAgent: $config.reviewerAgent, monitorModel: $config.monitorModel, monitorProvider: $config.monitorProvider, monitorAgent: $config.monitorAgent, maxIterations: $config.maxIterations, crossModelReviewEnforced: $config.crossModelReviewEnforced, workGuidelines: $config.workGuidelines, reviewGuidelines: $config.reviewGuidelines, configuredAt: $config.configuredAt}, crossModelReview: {enforced: $config.crossModelReviewEnforced, valid: $validation.valid, warning: $validation.warning}}')
     
     echo $(json_response "${id}" "${result}")
 }
@@ -1068,7 +1300,7 @@ handle_block() {
 handle_run() {
     local id="${1}"
     local params="${2}"
-    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines
+    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
@@ -1082,6 +1314,9 @@ handle_run() {
     cross_model_enforced=$(echo "${params}" | jq -r '.crossModelReviewEnforced // true')
     work_guidelines=$(echo "${params}" | jq -r '.workGuidelines // empty')
     review_guidelines=$(echo "${params}" | jq -r '.reviewGuidelines // empty')
+    monitor_model=$(echo "${params}" | jq -r '.monitorModel // env.RALPH_MONITOR_MODEL // empty')
+    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // env.RALPH_MONITOR_PROVIDER // empty')
+    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // env.RALPH_MONITOR_AGENT // "goose"')
     
     if [[ -z "${task}" ]]; then
         echo $(json_response "${id}" "" '{"code":-32602,"message":"Task is required"}')
@@ -1094,72 +1329,32 @@ handle_run() {
     fi
     
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
     
     local feedback=""
     local result
     
     for ((i=1; i<=max_iterations; i++)); do
-        local worker_prompt="You are the WORKER in a Ralph Loop iteration ${i}.
-    
-Task: ${task}"
-        
-        if [[ -n "${feedback}" ]]; then
-            worker_prompt="${worker_prompt}
-
-Previous feedback from reviewer: ${feedback}
-
-Please revise your work based on this feedback."
+        local is_existing="false"
+        if [[ ${i} -gt 1 ]]; then
+            is_existing="true"
         fi
-        
-        worker_prompt="${worker_prompt}
 
-Provide your complete work output and a brief summary.
-Output format:
-WORK:
-[your complete work here]
-
-SUMMARY:
-[brief summary of what you did]"
-        
         local worker_output
-        case "${worker_provider}" in
-            anthropic)
-                worker_output=$(echo "${worker_prompt}" | claude --model "${worker_model}" --print 2>/dev/null)
-                ;;
-            openai)
-                worker_output=$(echo "${worker_prompt}" | openai chat --model "${worker_model}" --no-stream 2>/dev/null)
-                ;;
-            google)
-                worker_output=$(echo "${worker_prompt}" | gemini --model "${worker_model}" --format=text 2>/dev/null)
-                ;;
-            copilot)
-                # GitHub Copilot CLI
-                worker_output=$(echo "${worker_prompt}" | copilot -p --allow-all-tools --model "${worker_model}" 2>/dev/null)
-                ;;
-            goose)
-                if [[ -n "${work_guidelines}" && -f "${work_guidelines}" ]]; then
-                    GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
-                    worker_output=$(goose run --recipe "${work_guidelines}" --session "${session_id}" --task "${task}" --feedback "${feedback}" 2>/dev/null)
-                else
-                    GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
-                    worker_output=$(goose run --session "${session_id}" --task "${task}" --feedback "${feedback}" 2>/dev/null)
-                fi
-                ;;
-            *)
-                echo $(json_response "${id}" "" '{"code":-32602,"message":"Unknown worker provider: '"${worker_provider}"'"}')
-                return
-                ;;
-        esac
+        worker_output=$(call_llm_worker "${task}" "${feedback}" "${i}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
         
         if [[ -z "${worker_output}" ]]; then
             echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - No output from worker"}')
             return
         fi
         
-        local work summary
-        work=$(echo "${worker_output}" | sed -n '/^WORK:/,/^SUMMARY:/p' | sed '1d;$d' | sed '/^$/d')
-        summary=$(echo "${worker_output}" | sed -n '/^SUMMARY:/,$p' | sed '1d' | sed '/^$/d')
+        local work_out_file="$(get_state_file "${session_id}" "work.out")"
+        echo "${worker_output}" > "${work_out_file}"
+
+        local parsed work summary
+        parsed=$(parse_worker_output "${worker_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${work_out_file}")
+        work=$(echo "${parsed}" | cut -d'|' -f1)
+        summary=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ -z "${work}" || -z "${summary}" ]]; then
             echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - Could not parse output"}')
@@ -1168,61 +1363,20 @@ SUMMARY:
         
         set_work "${session_id}" "${work}" "${summary}" "${i}"
         
-        local reviewer_prompt="You are the REVIEWER in a Ralph Loop iteration ${i}.
-    
-Original Task: ${task}
-
-Worker's Work:
-${work}
-
-Worker's Summary: ${summary}
-
-Review this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).
-If REVISE, provide specific, actionable feedback for the worker.
-
-Output format:
-DECISION: SHIP or REVISE
-FEEDBACK: [your feedback, or empty if SHIP]"
-        
         local reviewer_output
-        case "${reviewer_provider}" in
-            anthropic)
-                reviewer_output=$(echo "${reviewer_prompt}" | claude --model "${reviewer_model}" --print 2>/dev/null)
-                ;;
-            openai)
-                reviewer_output=$(echo "${reviewer_prompt}" | openai chat --model "${reviewer_model}" --no-stream 2>/dev/null)
-                ;;
-            google)
-                reviewer_output=$(echo "${reviewer_prompt}" | gemini --model "${reviewer_model}" --format=text 2>/dev/null)
-                ;;
-            copilot)
-                # GitHub Copilot CLI
-                reviewer_output=$(echo "${reviewer_prompt}" | copilot -p --allow-all-tools --model "${reviewer_model}" 2>/dev/null)
-                ;;
-            goose)
-                if [[ -n "${review_guidelines}" && -f "${review_guidelines}" ]]; then
-                    GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
-                    reviewer_output=$(goose run --recipe "${review_guidelines}" --session "${session_id}" --work "${work}" --summary "${summary}" 2>/dev/null)
-                else
-                    GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
-                    reviewer_output=$(goose run --session "${session_id}" --work "${work}" --summary "${summary}" 2>/dev/null)
-                fi
-                ;;
-            *)
-                echo $(json_response "${id}" "" '{"code":-32602,"message":"Unknown reviewer provider: '"${reviewer_provider}"'"}')
-                return
-                ;;
-        esac
+        reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${i}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
         
         if [[ -z "${reviewer_output}" ]]; then
             echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - No output from reviewer"}')
             return
         fi
         
-        local decision
-        decision=$(echo "${reviewer_output}" | grep -i "^DECISION:" | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-        decision=$(echo "${decision}" | tr '[:lower:]' '[:upper:]')
-        feedback=$(echo "${reviewer_output}" | sed -n '/^FEEDBACK:/,$p' | sed '1d' | sed '/^$/d')
+        local review_out_file="$(get_state_file "${session_id}" "review.out")"
+        echo "${reviewer_output}" > "${review_out_file}"
+
+        parsed=$(parse_reviewer_output "${reviewer_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${review_out_file}")
+        local decision=$(echo "${parsed}" | cut -d'|' -f1)
+        feedback=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ "${decision}" != "SHIP" && "${decision}" != "REVISE" ]]; then
             echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - Invalid decision: '"${decision}"'"}')
@@ -1246,10 +1400,161 @@ FEEDBACK: [your feedback, or empty if SHIP]"
     echo $(json_response "${id}" "${result}")
 }
 
-handle_list_methods() {
+handle_list_tools() {
     local id="${1}"
-    local methods='["ralph_loop_initialize","ralph_loop_get_task","ralph_loop_submit_work","ralph_loop_get_work","ralph_loop_submit_review","ralph_loop_get_feedback","ralph_loop_get_status","ralph_loop_get_config","ralph_loop_reset","ralph_loop_block","ralph_loop_run"]'
-    local result=$(jq -n --argjson methods "${methods}" '{methods: $methods}')
+    local tools='[
+  {
+    "name": "ralph_loop_initialize",
+    "description": "Initialize a new Ralph Loop session with a task, model configuration, and guidelines",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Unique session identifier (default: '\''default'\'')" },
+        "task": { "type": "string", "description": "The task or feature description for the worker to implement" },
+        "maxIterations": { "type": "integer", "description": "Maximum number of iterations (-1 for unlimited, default: 10)" },
+        "workerModel": { "type": "string", "description": "Worker LLM model name (e.g., '\''claude-3-5-sonnet'\'')" },
+        "workerProvider": { "type": "string", "description": "Worker provider (anthropic, openai, google, copilot, goose)" },
+        "workerAgent": { "type": "string", "description": "Worker agent CLI (goose, claude, openai, gemini, copilot, default: '\''goose'\'')" },
+        "reviewerModel": { "type": "string", "description": "Reviewer LLM model name (e.g., '\''gpt-4o'\'')" },
+        "reviewerProvider": { "type": "string", "description": "Reviewer provider (anthropic, openai, google, copilot, goose)" },
+        "reviewerAgent": { "type": "string", "description": "Reviewer agent CLI (goose, claude, openai, gemini, copilot, default: '\''goose'\'')" },
+        "monitorModel": { "type": "string", "description": "Monitoring agent model name (fallback supervisor)" },
+        "monitorProvider": { "type": "string", "description": "Monitoring agent provider (anthropic, openai, google, copilot, goose)" },
+        "monitorAgent": { "type": "string", "description": "Monitoring agent CLI (goose, claude, openai, gemini, copilot, default: '\''goose'\'')" },
+        "crossModelReviewEnforced": { "type": "boolean", "description": "Enforce cross-model review validation between worker and reviewer (default: true)" },
+        "workGuidelines": { "type": "string", "description": "Path to work recipe or guidelines file" },
+        "reviewGuidelines": { "type": "string", "description": "Path to review recipe or guidelines file" }
+      },
+      "required": ["task"]
+    }
+  },
+  {
+    "name": "ralph_loop_get_task",
+    "description": "Get the current task for the worker phase",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" }
+      }
+    }
+  },
+  {
+    "name": "ralph_loop_submit_work",
+    "description": "Submit work results and summary from worker phase",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" },
+        "work": { "type": "string", "description": "Complete work output / implementation" },
+        "summary": { "type": "string", "description": "Summary of changes made" },
+        "iteration": { "type": "integer", "description": "Current iteration number" }
+      },
+      "required": ["work", "summary", "iteration"]
+    }
+  },
+  {
+    "name": "ralph_loop_get_work",
+    "description": "Get worker'\''s submitted work for reviewer phase",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" }
+      }
+    }
+  },
+  {
+    "name": "ralph_loop_submit_review",
+    "description": "Submit review decision (SHIP or REVISE) with feedback",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" },
+        "decision": { "type": "string", "enum": ["SHIP", "REVISE"], "description": "Review decision: SHIP to approve, REVISE to request changes" },
+        "feedback": { "type": "string", "description": "Actionable feedback for revision (required if decision is REVISE)" },
+        "iteration": { "type": "integer", "description": "Current iteration number" }
+      },
+      "required": ["decision", "iteration"]
+    }
+  },
+  {
+    "name": "ralph_loop_get_feedback",
+    "description": "Get reviewer feedback for next iteration",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" }
+      }
+    }
+  },
+  {
+    "name": "ralph_loop_get_status",
+    "description": "Get current session status, phase, iteration, and configuration",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" }
+      }
+    }
+  },
+  {
+    "name": "ralph_loop_get_config",
+    "description": "Get worker, reviewer, and monitor configuration for a session",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" }
+      }
+    }
+  },
+  {
+    "name": "ralph_loop_reset",
+    "description": "Reset and clear all state and history for a session",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" }
+      }
+    }
+  },
+  {
+    "name": "ralph_loop_block",
+    "description": "Block the current iteration with a reason",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" },
+        "reason": { "type": "string", "description": "Reason why the loop cannot proceed" }
+      },
+      "required": ["reason"]
+    }
+  },
+  {
+    "name": "ralph_loop_run",
+    "description": "Run complete automated Ralph Loop (initialization -> orchestration -> execution -> state management)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "description": "Session ID (default: '\''default'\'')" },
+        "task": { "type": "string", "description": "Task description to accomplish" },
+        "maxIterations": { "type": "integer", "description": "Maximum number of iterations (-1 for unlimited, default: 10)" },
+        "workerModel": { "type": "string", "description": "Worker model name" },
+        "workerProvider": { "type": "string", "description": "Worker provider (anthropic, openai, google, copilot, goose)" },
+        "workerAgent": { "type": "string", "description": "Worker agent CLI (goose, claude, openai, gemini, copilot, default: '\''goose'\'')" },
+        "reviewerModel": { "type": "string", "description": "Reviewer model name" },
+        "reviewerProvider": { "type": "string", "description": "Reviewer provider (anthropic, openai, google, copilot, goose)" },
+        "reviewerAgent": { "type": "string", "description": "Reviewer agent CLI (goose, claude, openai, gemini, copilot, default: '\''goose'\'')" },
+        "monitorModel": { "type": "string", "description": "Monitor model name" },
+        "monitorProvider": { "type": "string", "description": "Monitor provider" },
+        "monitorAgent": { "type": "string", "description": "Monitor agent CLI (goose, claude, openai, gemini, copilot, default: '\''goose'\'')" },
+        "crossModelReviewEnforced": { "type": "boolean", "description": "Enforce cross-model review validation (default: true)" },
+        "workGuidelines": { "type": "string", "description": "Path to work recipe or guidelines file" },
+        "reviewGuidelines": { "type": "string", "description": "Path to review recipe or guidelines file" }
+      },
+      "required": ["task", "workerModel", "workerProvider", "reviewerModel", "reviewerProvider"]
+    }
+  }
+]'
+    local result=$(jq -n --argjson tools "${tools}" '{tools: $tools}')
     echo $(json_response "${id}" "${result}")
 }
 
@@ -1281,7 +1586,7 @@ else
                 echo '{"jsonrpc":"2.0","id":'$id',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"ralph-loop-runner","version":"1.0.0"}}}'
                 ;;
             "tools/list")
-                handle_list_methods "${id}"
+                handle_list_tools "${id}"
                 ;;
             "tools/call")
                 tool_name=$(echo "${params}" | jq -r '.name // empty')
