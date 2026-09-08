@@ -838,7 +838,13 @@ ${output}"
 
 # CLI orchestration main function
 run_cli() {
-    local task_input="${1}"
+    local task_input="${1:-}"
+    
+    # Help message check
+    if [[ "${task_input}" == "-h" || "${task_input}" == "--help" ]]; then
+        task_input=""
+    fi
+    
     local worker_model="${WORKER_MODEL}"
     local worker_provider="${WORKER_PROVIDER}"
     local worker_agent="${WORKER_AGENT}"

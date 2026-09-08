@@ -544,6 +544,29 @@ function Parse-ReviewerOutput {
 
 # CLI orchestration main function
 function Run-Cli { 
+    $cliArgs = $script:ScriptArgs
+    if ($cliArgs -contains '-h' -or $cliArgs -contains '--help') {
+        Write-Host "ralph-loop-runner - PowerShell Implementation"
+        Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md"
+        Write-Host ""
+        Write-Host "Options:"
+        Write-Host "  --worker-model MODEL         Worker model (default: `$env:RALPH_WORKER_MODEL)"
+        Write-Host "  --worker-provider PROVIDER   Worker provider (default: `$env:RALPH_WORKER_PROVIDER)"
+        Write-Host "  --worker-agent AGENT         Worker agent (default: `$env:RALPH_WORKER_AGENT)"
+        Write-Host "  --reviewer-model MODEL       Reviewer model (default: `$env:RALPH_REVIEWER_MODEL)"
+        Write-Host "  --reviewer-provider PROVIDER Reviewer provider (default: `$env:RALPH_REVIEWER_PROVIDER)"
+        Write-Host "  --reviewer-agent AGENT       Reviewer agent (default: `$env:RALPH_REVIEWER_AGENT)"
+        Write-Host "  --monitor-model MODEL        Monitor model (default: `$env:RALPH_MONITOR_MODEL)"
+        Write-Host "  --monitor-provider PROVIDER  Monitor provider (default: `$env:RALPH_MONITOR_PROVIDER)"
+        Write-Host "  --monitor-agent AGENT        Monitor agent (default: `$env:RALPH_MONITOR_AGENT)"
+        Write-Host "  --max-iterations N           Max iterations, -1 for infinite (default: `$env:RALPH_MAX_ITERATIONS)"
+        Write-Host "  --work-guidelines FILE       Work guidelines/recipe file"
+        Write-Host "  --review-guidelines FILE     Review guidelines/recipe file"
+        Write-Host "  --session-id ID              Session ID (default: auto-generated)"
+        Write-Host "  -h, --help                   Show this help message"
+        exit 0
+    }
+
     $workerModel = $script:WorkerModel
     $workerProvider = $script:WorkerProvider
     $workerAgent = $script:WorkerAgent
