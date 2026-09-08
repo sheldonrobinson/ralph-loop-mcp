@@ -391,6 +391,9 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 | `RALPH_MONITOR_MODEL` | Monitor model name | — |
 | `RALPH_MONITOR_PROVIDER` | Monitor provider (anthropic/openai/google/copilot/goose) | — |
 | `RALPH_MONITOR_AGENT` | Monitor agent (goose/claude/openai/gemini/copilot) | goose |
+| `RALPH_MAX_RETRIES` | Max retries for rate limits / quota errors | 3 |
+| `RALPH_INITIAL_BACKOFF` | Initial retry backoff delay in seconds | 5 |
+| `RALPH_THROTTLE_DELAY` | Proactive rate throttling delay in seconds before LLM calls | 0 |
 | `RALPH_RECIPE_DIR` | Base directory for recipes | `/usr/local/share/ralph-loop-runner/recipes` |
 
 ### Command-Line Arguments (CLI Mode)

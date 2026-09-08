@@ -13,6 +13,11 @@ RALPH_RECIPE_DIR="${RALPH_RECIPE_DIR:-/usr/local/share/ralph-loop-runner/recipes
 SAFE_COMMANDS=("ls" "pwd" "echo" "date" "cat" "mkdir" "rm" "cp" "mv" "jq")
 CMD_TIMEOUT=30
 
+# Rate limit & retry configuration
+RALPH_MAX_RETRIES="${RALPH_MAX_RETRIES:-3}"
+RALPH_INITIAL_BACKOFF="${RALPH_INITIAL_BACKOFF:-5}"
+RALPH_THROTTLE_DELAY="${RALPH_THROTTLE_DELAY:-0}"
+
 # Environment variable defaults
 WORKER_MODEL="${RALPH_WORKER_MODEL:-}"
 WORKER_PROVIDER="${RALPH_WORKER_PROVIDER:-}"
@@ -77,6 +82,71 @@ json_response() {
     fi
     resp+='}'
     echo "${resp}"
+}
+
+# Check if output contains rate limit / quota / resource errors
+is_rate_limit_error() {
+    local output="$1"
+    if echo "${output}" | grep -iqE "(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled)"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Rate throttling helper
+apply_rate_throttling() {
+    if [[ "${RALPH_THROTTLE_DELAY}" -gt 0 ]]; then
+        sleep "${RALPH_THROTTLE_DELAY}"
+    fi
+}
+
+# Retry helper with exponential backoff and rate throttling for LLM execution
+execute_llm_with_retry() {
+    apply_rate_throttling
+    local role_name="$1"
+    shift
+    local cmd=("$@")
+    local attempt=1
+    local backoff="${RALPH_INITIAL_BACKOFF}"
+    local max_attempts=$((RALPH_MAX_RETRIES + 1))
+    local output=""
+    local exit_code=0
+
+    while [[ ${attempt} -le ${max_attempts} ]]; do
+        set +e
+        output=$("${cmd[@]}" 2>&1)
+        exit_code=$?
+        set -e
+
+        # Success case (exit code 0 and non-empty output that is not a rate limit error string)
+        if [[ ${exit_code} -eq 0 && -n "${output}" ]] && ! is_rate_limit_error "${output}"; then
+            echo "${output}"
+            return 0
+        fi
+
+        # Check for rate limit or transient error
+        if is_rate_limit_error "${output}" || [[ ${exit_code} -ne 0 ]]; then
+            if [[ ${attempt} -lt ${max_attempts} ]]; then
+                echo "⚠️  [${role_name}] Rate limit / resource constraint detected on attempt ${attempt}/${RALPH_MAX_RETRIES}. Retrying in ${backoff}s..." >&2
+                sleep "${backoff}"
+                backoff=$((backoff * 2))
+                attempt=$((attempt + 1))
+                continue
+            else
+                echo "✗ [${role_name}] Rate limit / quota error persisted after ${RALPH_MAX_RETRIES} retries." >&2
+                if is_rate_limit_error "${output}"; then
+                    echo "RATE_LIMIT_EXCEEDED: ${output}"
+                fi
+                return 1
+            fi
+        fi
+
+        echo "${output}"
+        return 0
+    done
+
+    return 1
 }
 
 # =============================================================================
@@ -498,16 +568,16 @@ SUMMARY:
     
     case "${worker_agent}" in
         anthropic)
-            echo "${prompt}" | claude --model "${worker_model}" --print 2>/dev/null
+            execute_llm_with_retry "WORKER" bash -c "echo $(json_escape "${prompt}") | claude --model ${worker_model} --print"
             ;;
         openai)
-            echo "${prompt}" | openai chat --model "${worker_model}" --no-stream 2>/dev/null
+            execute_llm_with_retry "WORKER" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${worker_model} --no-stream"
             ;;
         google)
-            echo "${prompt}" | gemini --model "${worker_model}" --format=text 2>/dev/null
+            execute_llm_with_retry "WORKER" bash -c "echo $(json_escape "${prompt}") | gemini --model ${worker_model} --format=text"
             ;;
         copilot)
-            copilot -p --allow-all-tools "${prompt}" 2>/dev/null
+            execute_llm_with_retry "WORKER" copilot -p --allow-all-tools "${prompt}"
             ;;
         goose)
             local goose_args=("run")
@@ -529,8 +599,7 @@ SUMMARY:
             fi
             goose_args+=("--text" "${prompt}")
             
-            GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" \
-            goose "${goose_args[@]}" 2>/dev/null
+            execute_llm_with_retry "WORKER" env GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" goose "${goose_args[@]}"
             ;;
         *)
             echo "Error: Unknown agent ${worker_agent}" >&2
@@ -569,16 +638,16 @@ FEEDBACK: [your feedback, or empty if SHIP]"
     
     case "${reviewer_agent}" in
         anthropic)
-            echo "${prompt}" | claude --model "${reviewer_model}" --print 2>/dev/null
+            execute_llm_with_retry "REVIEWER" bash -c "echo $(json_escape "${prompt}") | claude --model ${reviewer_model} --print"
             ;;
         openai)
-            echo "${prompt}" | openai chat --model "${reviewer_model}" --no-stream 2>/dev/null
+            execute_llm_with_retry "REVIEWER" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${reviewer_model} --no-stream"
             ;;
         google)
-            echo "${prompt}" | gemini --model "${reviewer_model}" --format=text 2>/dev/null
+            execute_llm_with_retry "REVIEWER" bash -c "echo $(json_escape "${prompt}") | gemini --model ${reviewer_model} --format=text"
             ;;
         copilot)
-            copilot -p --allow-all-tools "${prompt}" 2>/dev/null
+            execute_llm_with_retry "REVIEWER" copilot -p --allow-all-tools "${prompt}"
             ;;
         goose)
             local goose_args=("run")
@@ -596,8 +665,7 @@ FEEDBACK: [your feedback, or empty if SHIP]"
             fi
             goose_args+=("--text" "${prompt}")
             
-            GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" \
-            goose "${goose_args[@]}" 2>/dev/null
+            execute_llm_with_retry "REVIEWER" env GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" goose "${goose_args[@]}"
             ;;
         *)
             echo "Error: Unknown agent ${reviewer_agent}" >&2
@@ -619,20 +687,19 @@ call_llm_monitor() {
     
     case "${monitor_agent}" in
         anthropic)
-            echo "${prompt}" | claude --model "${monitor_model}" --print 2>/dev/null
+            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | claude --model ${monitor_model} --print"
             ;;
         openai)
-            echo "${prompt}" | openai chat --model "${monitor_model}" --no-stream 2>/dev/null
+            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${monitor_model} --no-stream"
             ;;
         google)
-            echo "${prompt}" | gemini --model "${monitor_model}" --format=text 2>/dev/null
+            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | gemini --model ${monitor_model} --format=text"
             ;;
         goose)
-            GOOSE_MODEL="${monitor_model}" GOOSE_PROVIDER="${monitor_provider}" \
-            goose run --no-session --text "${prompt}" 2>/dev/null
+            execute_llm_with_retry "MONITOR" env GOOSE_MODEL="${monitor_model}" GOOSE_PROVIDER="${monitor_provider}" goose run --no-session --text "${prompt}"
             ;;
         *)
-            echo "${prompt}" | openai chat --model "${monitor_model}" --no-stream 2>/dev/null
+            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${monitor_model} --no-stream"
             ;;
     esac
 }
@@ -962,8 +1029,9 @@ run_cli() {
         local worker_output
         worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
         
-        if [[ -z "${worker_output}" ]]; then
-            echo "✗ WORK PHASE FAILED - No output from worker" >&2
+        if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
+            echo "✗ WORK PHASE FAILED - Rate limit, quota error, or no output from worker" >&2
+            block_iteration "${session_id}" "WORK PHASE FAILED - Rate limit or quota error from worker LLM"
             exit 1
         fi
         
@@ -991,8 +1059,9 @@ run_cli() {
         local reviewer_output
         reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
         
-        if [[ -z "${reviewer_output}" ]]; then
-            echo "✗ REVIEW PHASE FAILED - No output from reviewer" >&2
+        if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
+            echo "✗ REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" >&2
+            block_iteration "${session_id}" "REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM"
             exit 1
         fi
         
@@ -1343,8 +1412,9 @@ handle_run() {
         local worker_output
         worker_output=$(call_llm_worker "${task}" "${feedback}" "${i}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
         
-        if [[ -z "${worker_output}" ]]; then
-            echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - No output from worker"}')
+        if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
+            block_iteration "${session_id}" "WORK PHASE FAILED - Rate limit or quota error from worker LLM"
+            echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - Rate limit, quota error, or no output from worker"}')
             return
         fi
         
@@ -1366,8 +1436,9 @@ handle_run() {
         local reviewer_output
         reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${i}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
         
-        if [[ -z "${reviewer_output}" ]]; then
-            echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - No output from reviewer"}')
+        if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
+            block_iteration "${session_id}" "REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM"
+            echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer"}')
             return
         fi
         

@@ -33,6 +33,11 @@ $script:RalphRecipeDir = Coalesce $env:RALPH_RECIPE_DIR '/usr/local/share/ralph-
 $script:SafeCommands = @('ls', 'pwd', 'echo', 'date', 'cat', 'mkdir', 'rm', 'cp', 'mv', 'jq')
 $script:CmdTimeout = 30
 
+# Rate limit & retry configuration
+$script:MaxRetries = [int](Coalesce $env:RALPH_MAX_RETRIES 3)
+$script:InitialBackoff = [int](Coalesce $env:RALPH_INITIAL_BACKOFF 5)
+$script:ThrottleDelay = [int](Coalesce $env:RALPH_THROTTLE_DELAY 0)
+
 # Environment variable defaults
 $script:WorkerModel = Coalesce $env:RALPH_WORKER_MODEL ''
 $script:WorkerProvider = Coalesce $env:RALPH_WORKER_PROVIDER ''
@@ -59,6 +64,57 @@ function Get-StateFile { param([string]$SessionId = 'default', [string]$FileName
 function Ensure-StateDir { param([string]$SessionId = 'default'); $dir = Get-StateDir -SessionId $SessionId; if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null } }
 function ConvertTo-JsonEscaped { param([string]$Input); return ($Input | ConvertTo-Json -Compress -Depth 10).Trim('"') }
 function New-JsonResponse { param($Id, [string]$Result = '', [hashtable]$Error = $null); $resp = @{ jsonrpc = '2.0' }; if ($null -ne $Id -and $Id -ne 'null') { $resp.id = $Id } else { $resp.id = $null }; if ($null -ne $Error) { $resp.error = $Error } else { $resp.result = if ($Result) { $Result | ConvertFrom-Json } else { @{} } }; return $resp | ConvertTo-Json -Compress -Depth 10 }
+
+function Test-RateLimitError {
+    param([string]$Output)
+    if ($Output -match '(?i)(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled)') {
+        return $true
+    }
+    return $false
+}
+
+function Apply-RateThrottling {
+    if ($script:ThrottleDelay -gt 0) {
+        Start-Sleep -Seconds $script:ThrottleDelay
+    }
+}
+
+function Invoke-LlmWithRetry {
+    param(
+        [string]$RoleName,
+        [scriptblock]$ScriptBlock
+    )
+    Apply-RateThrottling
+    $attempt = 1
+    $backoff = $script:InitialBackoff
+    $maxAttempts = $script:MaxRetries + 1
+    $output = ''
+
+    while ($attempt -le $maxAttempts) {
+        $output = & $ScriptBlock
+        if ($output -and (-not (Test-RateLimitError -Output $output))) {
+            return $output
+        }
+
+        if ((Test-RateLimitError -Output $output) -or (-not $output)) {
+            if ($attempt -lt $maxAttempts) {
+                Write-Host "⚠️ [$RoleName] Rate limit / resource constraint detected on attempt $attempt/$($script:MaxRetries). Retrying in ${backoff}s..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $backoff
+                $backoff = $backoff * 2
+                $attempt++
+                continue
+            } else {
+                Write-Host "XX [$RoleName] Rate limit / quota error persisted after $($script:MaxRetries) retries." -ForegroundColor Red
+                if (Test-RateLimitError -Output $output) {
+                    return "RATE_LIMIT_EXCEEDED: $output"
+                }
+                return $null
+            }
+        }
+        return $output
+    }
+    return $null
+}
 
 # =============================================================================
 # CONFIG MANAGEMENT
@@ -328,64 +384,72 @@ function Call-WorkerLlm {
     $prompt = "You are the WORKER in a Ralph Loop iteration $Iteration.`n`nTask: $Task`n"
     if ($Feedback) { $prompt += "Previous feedback from reviewer: $Feedback`nPlease revise your work based on this feedback.`n" }
     $prompt += "Provide your complete work output and a brief summary.`nOutput format:`nWORK:`n[your complete work here]`n`nSUMMARY:`n[brief summary of what you did]`n"
-    switch ($WorkerAgent) { 
-        'anthropic' { return $prompt | claude --model $WorkerModel --print 2>$null } 
-        'openai'    { return $prompt | openai chat --model $WorkerModel --no-stream 2>$null } 
-        'google'    { return $prompt | gemini --model $WorkerModel --format=text 2>$null }
-        'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
-        'goose' { 
-            $gooseParams = @("task=$Task")
-            if ($Feedback) { $gooseParams += "feedback=$Feedback" }
-            $gooseArgs = @('run')
-            if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
-                $gooseArgs += '--recipe', $WorkGuidelines
+
+    return Invoke-LlmWithRetry -RoleName 'WORKER' -ScriptBlock {
+        switch ($WorkerAgent) { 
+            'anthropic' { return $prompt | claude --model $WorkerModel --print 2>$null } 
+            'openai'    { return $prompt | openai chat --model $WorkerModel --no-stream 2>$null } 
+            'google'    { return $prompt | gemini --model $WorkerModel --format=text 2>$null }
+            'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
+            'goose' { 
+                $gooseParams = @("task=$Task")
+                if ($Feedback) { $gooseParams += "feedback=$Feedback" }
+                $gooseArgs = @('run')
+                if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
+                    $gooseArgs += '--recipe', $WorkGuidelines
+                }
+                $gooseArgs += '--params', ($gooseParams -join ' ')
+                if ($SessionId) { 
+                    if ($IsExisting) { $gooseArgs += '--resume' }
+                    $gooseArgs += '--name', $SessionId
+                } else { 
+                    $gooseArgs += '--no-session' 
+                } 
+                $gooseArgs += '--text', $prompt
+                $env:GOOSE_MODEL = $WorkerModel
+                $env:GOOSE_PROVIDER = $WorkerProvider
+                goose $gooseArgs 1>work.out 2>$null
+                if (Test-Path work.out) { return Get-Content work.out -Raw } else { return $null }
             }
-            $gooseArgs += '--params', ($gooseParams -join ' ')
-            if ($SessionId) { 
-                if ($IsExisting) { $gooseArgs += '--resume' }
-                $gooseArgs += '--name', $SessionId
-            } else { 
-                $gooseArgs += '--no-session' 
-            } 
-            $gooseArgs += '--text', $prompt
-            $env:GOOSE_MODEL = $WorkerModel
-            $env:GOOSE_PROVIDER = $WorkerProvider
-            goose $gooseArgs 1>work.out 2>$null; if (Test-Path work.out) { return Get-Content work.out -Raw } else { return $null }
-        }
-        default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
-    } 
+            default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
+        } 
+    }
 }
 
 function Call-ReviewerLlm { 
     param([string]$Task, [string]$Work, [string]$Summary, [int]$Iteration, [string]$SessionId, [string]$ReviewerModel, [string]$ReviewerProvider, [string]$ReviewerAgent, [string]$ReviewGuidelines, [bool]$IsExisting = $false)
     $prompt = "You are the REVIEWER in a Ralph Loop iteration $Iteration.`n`nOriginal Task: $Task`n`nWorker's Work:`n$Work`n`nWorker's Summary: $Summary`n`nReview this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).`nIf REVISE, provide specific, actionable feedback for the worker.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [your feedback, or empty if SHIP]`n"
-    switch ($ReviewerAgent) { 
-        'anthropic' { return $prompt | claude --model $ReviewerModel --print 2>$null } 
-        'openai'    { return $prompt | openai chat --model $ReviewerModel --no-stream 2>$null } 
-        'google'    { return $prompt | gemini --model $ReviewerModel --format=text 2>$null } 
-        'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
-        'goose' { 
-            $gooseParams = @("task=$Task")
-            if ($Work) { $gooseParams += "Work=$Work" }
-            if ($Summary) { $gooseParams += "Summary=$Summary" }
-            $gooseArgs = @('run')
-            if ($ReviewGuidelines -and (Test-Path $ReviewGuidelines)) { 
-                $gooseArgs += '--recipe', $ReviewGuidelines
+
+    return Invoke-LlmWithRetry -RoleName 'REVIEWER' -ScriptBlock {
+        switch ($ReviewerAgent) { 
+            'anthropic' { return $prompt | claude --model $ReviewerModel --print 2>$null } 
+            'openai'    { return $prompt | openai chat --model $ReviewerModel --no-stream 2>$null } 
+            'google'    { return $prompt | gemini --model $ReviewerModel --format=text 2>$null } 
+            'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
+            'goose' { 
+                $gooseParams = @("task=$Task")
+                if ($Work) { $gooseParams += "Work=$Work" }
+                if ($Summary) { $gooseParams += "Summary=$Summary" }
+                $gooseArgs = @('run')
+                if ($ReviewGuidelines -and (Test-Path $ReviewGuidelines)) { 
+                    $gooseArgs += '--recipe', $ReviewGuidelines
+                }
+                $gooseArgs += '--params', ($gooseParams -join ' ')
+                if ($SessionId) {
+                    if ($IsExisting) { $gooseArgs += '--resume' }
+                    $gooseArgs += '--name', $SessionId
+                } else { 
+                    $gooseArgs += '--no-session' 
+                } 
+                $gooseArgs += '--text', $prompt
+                $env:GOOSE_MODEL = $ReviewerModel
+                $env:GOOSE_PROVIDER = $ReviewerProvider
+                goose $gooseArgs 1>review.out 2>$null
+                if (Test-Path review.out) { return Get-Content review.out -Raw } else { return $null }
             }
-            $gooseArgs += '--params', ($gooseParams -join ' ')
-            if ($SessionId) {
-                if ($IsExisting) { $gooseArgs += '--resume' }
-                $gooseArgs += '--name', $SessionId
-            } else { 
-                $gooseArgs += '--no-session' 
-            } 
-            $gooseArgs += '--text', $prompt
-            $env:GOOSE_MODEL = $ReviewerModel
-            $env:GOOSE_PROVIDER = $ReviewerProvider
-            goose $gooseArgs 1>review.out 2>$null; if (Test-Path review.out) { return Get-Content review.out -Raw } else { return $null }
-        }
-        default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
-    } 
+            default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
+        } 
+    }
 }
 
 function Call-MonitorLlm {
@@ -397,23 +461,26 @@ function Call-MonitorLlm {
     if (-not $MonitorModel) { $MonitorModel = $script:WorkerModel }
     if (-not $MonitorProvider) { $MonitorProvider = $script:WorkerProvider }
     if (-not $MonitorAgent) { $MonitorAgent = $script:WorkerAgent }
-    switch ($MonitorAgent) {
-        'anthropic' { return $Prompt | claude --model $MonitorModel --print 2>$null }
-        'openai'    { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
-        'google'    { return $Prompt | gemini --model $MonitorModel --format=text 2>$null }
-        'goose'     {
-                      $env:GOOSE_MODEL = $MonitorModel
-                      $env:GOOSE_PROVIDER = $MonitorProvider
-                      # Write prompt to temp file and pipe via stdin to avoid command-line length limits
-                      $tempFile = Join-Path $env:TEMP "ralph-monitor-$([System.IO.Path]::GetRandomFileName()).txt"
-                      try {
-                          $Prompt | Out-File -FilePath $tempFile -Encoding UTF8
-                          return goose run --no-session -i $tempFile 2>$null
-                      } finally {
-                          if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
-                      }
-                    }
-        default     { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
+
+    return Invoke-LlmWithRetry -RoleName 'MONITOR' -ScriptBlock {
+        switch ($MonitorAgent) {
+            'anthropic' { return $Prompt | claude --model $MonitorModel --print 2>$null }
+            'openai'    { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
+            'google'    { return $Prompt | gemini --model $MonitorModel --format=text 2>$null }
+            'goose'     {
+                          $env:GOOSE_MODEL = $MonitorModel
+                          $env:GOOSE_PROVIDER = $MonitorProvider
+                          # Write prompt to temp file and pipe via stdin to avoid command-line length limits
+                          $tempFile = Join-Path $env:TEMP "ralph-monitor-$([System.IO.Path]::GetRandomFileName()).txt"
+                          try {
+                              $Prompt | Out-File -FilePath $tempFile -Encoding UTF8
+                              return goose run --no-session -i $tempFile 2>$null
+                          } finally {
+                              if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+                          }
+                        }
+            default     { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
+        }
     }
 }
 
@@ -560,7 +627,12 @@ function Run-Cli {
         Write-Host "Worker: $workerModel ($workerProvider) via $workerAgent"
 
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
-        if (-not $workerOutput) { Write-Host "XX WORK PHASE FAILED - No output from worker" -ForegroundColor Red; exit 1 }
+        
+        if ($workerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $workerOutput)) {
+            Write-Host "XX WORK PHASE FAILED - Rate limit, quota error, or no output from worker" -ForegroundColor Red
+            Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
+            exit 1
+        }
 
         # Save worker output to file for Monitor LLM fallback
         $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
@@ -578,7 +650,12 @@ function Run-Cli {
         Write-Host "Reviewer: $reviewerModel ($reviewerProvider) via $reviewerAgent"
 
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
-        if (-not $reviewerOutput) { Write-Host "XX REVIEW PHASE FAILED - No output from reviewer" -ForegroundColor Red; exit 1 }
+        
+        if ($reviewerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $reviewerOutput)) {
+            Write-Host "XX REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" -ForegroundColor Red
+            Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
+            exit 1
+        }
 
         # Save reviewer output to file for Monitor LLM fallback
         $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
@@ -839,7 +916,11 @@ function Handle-Run {
         $workerPrompt += "Provide your complete work output and a brief summary.`nOutput format:`nWORK:`n[your complete work here]`n`nSUMMARY:`n[brief summary of what you did]`n"
 
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting ($i -gt 1)
-        if (-not $workerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - No output from worker' } }
+        
+        if ($workerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $workerOutput)) {
+            Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
+            return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Rate limit, quota error, or no output from worker' }
+        }
 
         # Save worker output to file for Monitor LLM fallback
         $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
@@ -854,7 +935,11 @@ function Handle-Run {
         $reviewerPrompt = "You are the REVIEWER in a Ralph Loop iteration $i.`n`nOriginal Task: $task`n`nWorker's Work:`n$work`n`nWorker's Summary: $summary`n`nReview this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).`nIf REVISE, provide specific, actionable feedback for the worker.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [your feedback, or empty if SHIP]`n"
 
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting ($i -gt 1)
-        if (-not $reviewerOutput) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - No output from reviewer' } }
+        
+        if ($reviewerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $reviewerOutput)) {
+            Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
+            return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer' }
+        }
 
         # Save reviewer output to file for Monitor LLM fallback
         $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
