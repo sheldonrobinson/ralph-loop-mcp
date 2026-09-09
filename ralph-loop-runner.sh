@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿[EMOJI]\\\#!/usr/bin/env bash
 # ralph-loop-runner - Bash Implementation (Unified: MCP Server + CLI Orchestration)
 # Cross-platform implementation of the Ralph Loop iterative development technique
 # For Linux/macOS
@@ -128,13 +128,13 @@ execute_llm_with_retry() {
         # Check for rate limit or transient error
         if is_rate_limit_error "${output}" || [[ ${exit_code} -ne 0 ]]; then
             if [[ ${attempt} -lt ${max_attempts} ]]; then
-                echo "⚠️  [${role_name}] Rate limit / resource constraint detected on attempt ${attempt}/${RALPH_MAX_RETRIES}. Retrying in ${backoff}s..." >&2
+                echo "[WARN]  [${role_name}] Rate limit / resource constraint detected on attempt ${attempt}/${RALPH_MAX_RETRIES}. Retrying in ${backoff}s..." >&2
                 sleep "${backoff}"
                 backoff=$((backoff * 2))
                 attempt=$((attempt + 1))
                 continue
             else
-                echo "✗ [${role_name}] Rate limit / quota error persisted after ${RALPH_MAX_RETRIES} retries." >&2
+                echo "[WARN] [${role_name}] Rate limit / quota error persisted after ${RALPH_MAX_RETRIES} retries." >&2
                 if is_rate_limit_error "${output}"; then
                     echo "RATE_LIMIT_EXCEEDED: ${output}"
                 fi
@@ -584,7 +584,7 @@ SUMMARY:
             if [[ -n "${work_guidelines}" && -f "${work_guidelines}" ]]; then
                 goose_args+=("--recipe" "${work_guidelines}")
             fi
-            local params_str="task=${task}"
+            local params_str="task=\${task} sessionId=\${session_id}"
             if [[ -n "${feedback}" ]]; then
                 params_str+=" feedback=${feedback}"
             fi
@@ -654,7 +654,7 @@ FEEDBACK: [your feedback, or empty if SHIP]"
             if [[ -n "${review_guidelines}" && -f "${review_guidelines}" ]]; then
                 goose_args+=("--recipe" "${review_guidelines}")
             fi
-            goose_args+=("--params" "task=${task} work=${work} summary=${summary}")
+            goose_args+=("--params" "task=${task} work=${work} summary=${summary} sessionId=${session_id}")
             if [[ -n "${session_id}" ]]; then
                 if [[ "${is_existing}" == "true" ]]; then
                     goose_args+=("--resume")
@@ -715,10 +715,10 @@ parse_worker_output() {
     local summary=""
     
     if [[ "${output}" == *"WORK:"* ]]; then
-        work=$(echo "${output}" | sed -n '/^WORK:/,/^SUMMARY:/p' | sed '1d;$d' | sed '/^$/d')
+        work=$(echo "${output}" | awk '/^WORK:/{flag=1; next} /^SUMMARY:/{flag=0} flag')
     fi
     if [[ "${output}" == *"SUMMARY:"* ]]; then
-        summary=$(echo "${output}" | sed -n '/^SUMMARY:/,$p' | sed '1d' | sed '/^$/d')
+        summary=$(echo "${output}" | awk '/^SUMMARY:/{flag=1; next} flag')
     fi
     
     # Regex failed -- try Monitor LLM fallback
@@ -758,10 +758,10 @@ ${output}"
         monitor_response=$(call_llm_monitor "${monitor_prompt}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
         if [[ -n "${monitor_response}" ]]; then
             if [[ "${monitor_response}" == *"WORK:"* ]]; then
-                work=$(echo "${monitor_response}" | sed -n '/^WORK:/,/^SUMMARY:/p' | sed '1d;$d' | sed '/^$/d')
+                work=$(echo "${monitor_response}" | awk '/^WORK:/{flag=1; next} /^SUMMARY:/{flag=0} flag')
             fi
             if [[ "${monitor_response}" == *"SUMMARY:"* ]]; then
-                summary=$(echo "${monitor_response}" | sed -n '/^SUMMARY:/,$p' | sed '1d' | sed '/^$/d')
+                summary=$(echo "${monitor_response}" | awk '/^SUMMARY:/{flag=1; next} flag')
             fi
         fi
         
@@ -786,11 +786,10 @@ parse_reviewer_output() {
     local feedback=""
     
     if [[ "${output}" == *"DECISION:"* ]]; then
-        decision=$(echo "${output}" | grep -i "^DECISION:" | head -n 1 | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-        decision=$(echo "${decision}" | tr '[:lower:]' '[:upper:]')
+        decision=$(echo "${output}" | awk '/^DECISION:/{print toupper($2); exit}')
     fi
     if [[ "${output}" == *"FEEDBACK:"* ]]; then
-        feedback=$(echo "${output}" | sed -n '/^FEEDBACK:/,$p' | sed '1d' | sed '/^$/d')
+        feedback=$(echo "${output}" | awk '/^FEEDBACK:/{flag=1; next} flag')
     fi
     
     # Regex failed -- try Monitor LLM fallback
@@ -818,11 +817,10 @@ ${output}"
         monitor_response=$(call_llm_monitor "${monitor_prompt}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
         if [[ -n "${monitor_response}" ]]; then
             if [[ "${monitor_response}" == *"DECISION:"* ]]; then
-                decision=$(echo "${monitor_response}" | grep -i "^DECISION:" | head -n 1 | sed 's/DECISION: *//i' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-                decision=$(echo "${decision}" | tr '[:lower:]' '[:upper:]')
+                decision=$(echo "${monitor_response}" | awk '/^DECISION:/{print toupper($2); exit}')
             fi
             if [[ "${monitor_response}" == *"FEEDBACK:"* ]]; then
-                feedback=$(echo "${monitor_response}" | sed -n '/^FEEDBACK:/,$p' | sed '1d' | sed '/^$/d')
+                feedback=$(echo "${monitor_response}" | awk '/^FEEDBACK:/{flag=1; next} flag')
             fi
         fi
         
@@ -838,13 +836,6 @@ ${output}"
 
 # CLI orchestration main function
 run_cli() {
-    local task_input="${1:-}"
-    
-    # Help message check
-    if [[ "${task_input}" == "-h" || "${task_input}" == "--help" ]]; then
-        task_input=""
-    fi
-    
     local worker_model="${WORKER_MODEL}"
     local worker_provider="${WORKER_PROVIDER}"
     local worker_agent="${WORKER_AGENT}"
@@ -857,6 +848,116 @@ run_cli() {
     local monitor_model="${MONITOR_MODEL}"
     local monitor_provider="${MONITOR_PROVIDER}"
     local monitor_agent="${MONITOR_AGENT}"
+    local max_retries="${RALPH_MAX_RETRIES}"
+    local initial_backoff="${RALPH_INITIAL_BACKOFF}"
+    local throttle_delay="${RALPH_THROTTLE_DELAY}"
+    local task_input=""
+    
+    # Parse command line arguments - options first, then task as final positional arg
+    while [[ $# -gt 0 ]]; do
+        case "${1}" in
+            -h|--help)
+                echo "Usage: $0 [options] \"task description\" or $0 [options] /path/to/task.md"
+                echo ""
+                echo "Options:"
+                echo "  --worker-model MODEL         Worker model (default: \$RALPH_WORKER_MODEL)"
+                echo "  --worker-provider PROVIDER   Worker provider (default: \$RALPH_WORKER_PROVIDER)"
+                echo "  --worker-agent AGENT         Worker agent (default: \$RALPH_WORKER_AGENT)"
+                echo "  --reviewer-model MODEL       Reviewer model (default: \$RALPH_REVIEWER_MODEL)"
+                echo "  --reviewer-provider PROVIDER Reviewer provider (default: \$RALPH_REVIEWER_PROVIDER)"
+                echo "  --reviewer-agent AGENT       Reviewer agent (default: \$RALPH_REVIEWER_AGENT)"
+                echo "  --monitor-model MODEL        Monitor model (default: \$RALPH_MONITOR_MODEL)"
+                echo "  --monitor-provider PROVIDER  Monitor provider (default: \$RALPH_MONITOR_PROVIDER)"
+                echo "  --monitor-agent AGENT        Monitor agent (default: \$RALPH_MONITOR_AGENT)"
+                echo "  --max-iterations N           Max iterations, -1 for infinite (default: \$RALPH_MAX_ITERATIONS)"
+                echo "  --work-guidelines FILE       Work guidelines/recipe file (default: \$RALPH_WORK_GUIDELINES)"
+                echo "  --review-guidelines FILE     Review guidelines/recipe file (default: \$RALPH_REVIEW_GUIDELINES)"
+                echo "  --session-id ID              Session ID (default: auto-generated)"
+                echo "  --max-retries N              Max retry attempts for rate limits (default: \$RALPH_MAX_RETRIES)"
+                echo "  --initial-backoff N          Initial backoff seconds for retries (default: \$RALPH_INITIAL_BACKOFF)"
+                echo "  --throttle-delay N           Delay between requests in seconds (default: \$RALPH_THROTTLE_DELAY)"
+                exit 0
+                ;;
+            --worker-model)
+                worker_model="${2}"
+                shift 2
+                ;;
+            --worker-provider)
+                worker_provider="${2}"
+                shift 2
+                ;;
+            --worker-agent)
+                worker_agent="${2}"
+                shift 2
+                ;;
+            --reviewer-model)
+                reviewer_model="${2}"
+                shift 2
+                ;;
+            --reviewer-provider)
+                reviewer_provider="${2}"
+                shift 2
+                ;;
+            --reviewer-agent)
+                reviewer_agent="${2}"
+                shift 2
+                ;;
+            --monitor-model)
+                monitor_model="${2}"
+                shift 2
+                ;;
+            --monitor-provider)
+                monitor_provider="${2}"
+                shift 2
+                ;;
+            --monitor-agent)
+                monitor_agent="${2}"
+                shift 2
+                ;;
+            --max-iterations)
+                max_iterations="${2}"
+                shift 2
+                ;;
+            --work-guidelines)
+                work_guidelines="${2}"
+                shift 2
+                ;;
+            --review-guidelines)
+                review_guidelines="${2}"
+                shift 2
+                ;;
+            --max-retries)
+                max_retries="${2}"
+                shift 2
+                ;;
+            --initial-backoff)
+                initial_backoff="${2}"
+                shift 2
+                ;;
+            --throttle-delay)
+                throttle_delay="${2}"
+                shift 2
+                ;;
+            --session-id)
+                CLI_SESSION_ID="${2}"
+                shift 2
+                ;;
+            -*)
+                echo "Error: Unknown option: ${1}"
+                exit 1
+                ;;
+            *)
+                # This is the task input (file path or task description)
+                task_input="${1}"
+                shift
+                ;;
+        esac
+    done
+    
+    # Update global retry config from CLI options
+    RALPH_MAX_RETRIES="${max_retries}"
+    RALPH_INITIAL_BACKOFF="${initial_backoff}"
+    RALPH_THROTTLE_DELAY="${throttle_delay}"
     
     # Get task from file or argument
     local task
@@ -868,7 +969,7 @@ run_cli() {
     
     if [[ -z "${task}" ]]; then
         echo "Error: No task provided"
-        echo "Usage: $0 \"task description\" or $0 /path/to/task.md"
+        echo "Usage: $0 [options] \"task description\" or $0 [options] /path/to/task.md"
         echo ""
         echo "Options:"
         echo "  --worker-model MODEL         Worker model (default: \$RALPH_WORKER_MODEL)"
@@ -884,69 +985,11 @@ run_cli() {
         echo "  --work-guidelines FILE       Work guidelines/recipe file (default: \$RALPH_WORK_GUIDELINES)"
         echo "  --review-guidelines FILE     Review guidelines/recipe file (default: \$RALPH_REVIEW_GUIDELINES)"
         echo "  --session-id ID              Session ID (default: auto-generated)"
+        echo "  --max-retries N              Max retry attempts for rate limits (default: \$RALPH_MAX_RETRIES)"
+        echo "  --initial-backoff N          Initial backoff seconds for retries (default: \$RALPH_INITIAL_BACKOFF)"
+        echo "  --throttle-delay N           Delay between requests in seconds (default: \$RALPH_THROTTLE_DELAY)"
         exit 1
     fi
-    
-    # Parse command line arguments
-    while [[ $# -gt 1 ]]; do
-        case "${2}" in
-            --worker-model)
-                worker_model="${3}"
-                shift 2
-                ;;
-            --worker-provider)
-                worker_provider="${3}"
-                shift 2
-                ;;
-            --worker-agent)
-                worker_agent="${3}"
-                shift 2
-                ;;
-            --reviewer-model)
-                reviewer_model="${3}"
-                shift 2
-                ;;
-            --reviewer-provider)
-                reviewer_provider="${3}"
-                shift 2
-                ;;
-            --reviewer-agent)
-                reviewer_agent="${3}"
-                shift 2
-                ;;
-            --monitor-model)
-                monitor_model="${3}"
-                shift 2
-                ;;
-            --monitor-provider)
-                monitor_provider="${3}"
-                shift 2
-                ;;
-            --monitor-agent)
-                monitor_agent="${3}"
-                shift 2
-                ;;
-            --max-iterations)
-                max_iterations="${3}"
-                shift 2
-                ;;
-            --work-guidelines)
-                work_guidelines="${3}"
-                shift 2
-                ;;
-            --review-guidelines)
-                review_guidelines="${3}"
-                shift 2
-                ;;
-            --session-id)
-                CLI_SESSION_ID="${3}"
-                shift 2
-                ;;
-            *)
-                shift
-                ;;
-        esac
-    done
     
     # Prompt for missing config
     if [[ -z "${worker_model}" ]]; then
@@ -1012,7 +1055,7 @@ run_cli() {
     # Handle infinite iterations
     local max_iter
     if [[ "${max_iterations}" -eq -1 ]]; then
-        max_iter=999999
+        max_iter=999999999
     else
         max_iter="${max_iterations}"
     fi
@@ -1024,7 +1067,7 @@ run_cli() {
         echo "======================================================================"
         
         # WORK PHASE
-        echo "▶ WORK PHASE"
+        echo "[WORK] WORK PHASE"
         echo "Worker: ${worker_model} (${worker_provider}) via ${worker_agent}"
         
         local is_existing="false"
@@ -1036,7 +1079,7 @@ run_cli() {
         worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
         
         if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
-            echo "✗ WORK PHASE FAILED - Rate limit, quota error, or no output from worker" >&2
+            echo "[WARN] WORK PHASE FAILED - Rate limit, quota error, or no output from worker" >&2
             block_iteration "${session_id}" "WORK PHASE FAILED - Rate limit or quota error from worker LLM"
             exit 1
         fi
@@ -1050,7 +1093,7 @@ run_cli() {
         summary=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ -z "${work}" || -z "${summary}" ]]; then
-            echo "✗ WORK PHASE FAILED - Could not parse output" >&2
+            echo "[WARN] WORK PHASE FAILED - Could not parse output" >&2
             exit 1
         fi
         
@@ -1059,14 +1102,14 @@ run_cli() {
         echo ""
         
         # REVIEW PHASE
-        echo "▶ REVIEW PHASE"
+        echo "[REVIEW] REVIEW PHASE"
         echo "Reviewer: ${reviewer_model} (${reviewer_provider}) via ${reviewer_agent}"
         
         local reviewer_output
         reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
         
         if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
-            echo "✗ REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" >&2
+            echo "[WARN] REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" >&2
             block_iteration "${session_id}" "REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM"
             exit 1
         fi
@@ -1079,7 +1122,7 @@ run_cli() {
         feedback=$(echo "${parsed}" | cut -d'|' -f2)
         
         if [[ "${decision}" != "SHIP" && "${decision}" != "REVISE" ]]; then
-            echo "✗ REVIEW PHASE FAILED - Invalid decision: ${decision}" >&2
+            echo "[WARN] REVIEW PHASE FAILED - Invalid decision: ${decision}" >&2
             exit 1
         fi
         
@@ -1088,20 +1131,20 @@ run_cli() {
         if [[ "${decision}" == "SHIP" ]]; then
             echo ""
             echo "======================================================================"
-            echo "  ✓ SHIPPED after ${iteration} iteration(s)"
+            echo "  [EMOJI]"" SHIPPED after ${iteration} iteration(s)"
             echo "======================================================================"
             echo "Session: ${session_id}"
             echo "Complete: $(date)"
             exit 0
         else
             echo ""
-            echo "↪ REVISE - Feedback for next iteration:"
+            echo "[EMOJI] REVISE - Feedback for next iteration:"
             echo "${feedback}"
             echo ""
         fi
     done
     
-    echo "✗ Max iterations (${max_iterations}) reached" >&2
+    echo "[WARN] Max iterations (${max_iterations}) reached" >&2
     exit 1
 }
 
@@ -1125,9 +1168,9 @@ handle_initialize() {
     reviewer_model=$(echo "${params}" | jq -r '.reviewerModel // empty')
     reviewer_provider=$(echo "${params}" | jq -r '.reviewerProvider // empty')
     reviewer_agent=$(echo "${params}" | jq -r '.reviewerAgent // "goose"')
-    monitor_model=$(echo "${params}" | jq -r '.monitorModel // env.RALPH_MONITOR_MODEL // empty')
-    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // env.RALPH_MONITOR_PROVIDER // empty')
-    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // env.RALPH_MONITOR_AGENT // "goose"')
+    monitor_model=$(echo "${params}" | jq -r '.monitorModel // \$RALPH_MONITOR_MODEL // empty')
+    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // \$RALPH_MONITOR_PROVIDER // empty')
+    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // \$RALPH_MONITOR_AGENT // "goose"')
     cross_model_enforced=$(echo "${params}" | jq -r '.crossModelReviewEnforced // true')
     work_guidelines=$(echo "${params}" | jq -r '.workGuidelines // empty')
     review_guidelines=$(echo "${params}" | jq -r '.reviewGuidelines // empty')
@@ -1389,9 +1432,9 @@ handle_run() {
     cross_model_enforced=$(echo "${params}" | jq -r '.crossModelReviewEnforced // true')
     work_guidelines=$(echo "${params}" | jq -r '.workGuidelines // empty')
     review_guidelines=$(echo "${params}" | jq -r '.reviewGuidelines // empty')
-    monitor_model=$(echo "${params}" | jq -r '.monitorModel // env.RALPH_MONITOR_MODEL // empty')
-    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // env.RALPH_MONITOR_PROVIDER // empty')
-    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // env.RALPH_MONITOR_AGENT // "goose"')
+    monitor_model=$(echo "${params}" | jq -r '.monitorModel // \$RALPH_MONITOR_MODEL // empty')
+    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // \$RALPH_MONITOR_PROVIDER // empty')
+    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // \$RALPH_MONITOR_AGENT // "goose"')
     
     if [[ -z "${task}" ]]; then
         echo $(json_response "${id}" "" '{"code":-32602,"message":"Task is required"}')
@@ -1713,3 +1756,32 @@ else
         esac
     done
 fi
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

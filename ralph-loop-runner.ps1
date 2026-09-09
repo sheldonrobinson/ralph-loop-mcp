@@ -1,4 +1,4 @@
-<#>
+﻿<#>
 .SYNOPSIS
     ralph-loop-runner - PowerShell Implementation (Unified: MCP Server + CLI Orchestration)
     Cross-platform implementation of the Ralph Loop iterative development technique
@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 function Coalesce { param($Value, $Default); if ($null -ne $Value -and $Value -ne '') { return $Value }; return $Default }
 
 # Helper: Safely convert JSON to dictionary
-function JsonToDict { param([string]$Json); $obj = $Json | ConvertFrom-Json; if ($obj -isnot [System.Management.Automation.PSCustomObject]) { return @{ value = $obj } }; $dict = @{}; foreach ($prop in $obj.PSObject.Properties) { $dict[$prop.Name] = $prop.Value }; return $dict }
+function JsonToDict \{ param(\[string\]\$Json); \$obj = \$Json \| ConvertFrom-Json; if (\$obj -isnot \[System.Management.Automation.PSCustomObject\]) \{ return @\{ value = \$obj \} \}; \$dict = @\{\}; foreach (\$prop in \$obj.PSObject.Properties) \{ \$val = \$prop.Value; if (\$val -is \[System.Management.Automation.PSCustomObject\]) \{ \$val = \$val \| ConvertTo-Json -Depth 10 \| ConvertFrom-Json \}; \$dict\[\$prop.Name\] = \$val \}; return \$dict \}
 
 # Ensure jq is available
 if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
@@ -98,13 +98,13 @@ function Invoke-LlmWithRetry {
 
         if ((Test-RateLimitError -Output $output) -or (-not $output)) {
             if ($attempt -lt $maxAttempts) {
-                Write-Host "⚠️ [$RoleName] Rate limit / resource constraint detected on attempt $attempt/$($script:MaxRetries). Retrying in ${backoff}s..." -ForegroundColor Yellow
+                Write-Host "[WARN] [$RoleName] Rate limit / resource constraint detected on attempt $attempt/$($script:MaxRetries). Retrying in ${backoff}s..." -ForegroundColor Yellow
                 Start-Sleep -Seconds $backoff
                 $backoff = $backoff * 2
                 $attempt++
                 continue
             } else {
-                Write-Host "XX [$RoleName] Rate limit / quota error persisted after $($script:MaxRetries) retries." -ForegroundColor Red
+                Write-Host "[ERROR] [$RoleName] Rate limit / quota error persisted after $($script:MaxRetries) retries." -ForegroundColor Red
                 if (Test-RateLimitError -Output $output) {
                     return "RATE_LIMIT_EXCEEDED: $output"
                 }
@@ -197,7 +197,7 @@ function Get-Task { param([string]$SessionId = 'default'); $taskFile = Get-State
 function Set-Work { 
     param([string]$SessionId, [string]$Work, [string]$Summary, [int]$Iteration)
     Ensure-StateDir -SessionId $SessionId
-    $workFile = Get-StateFile -SessionId $SessionId -FileName 'work.json'
+    $workFile = Get-StateFile -SessionId $SessionId -FileName ''
     $workObj = @{ work = $Work; summary = $Summary; submittedAt = (Get-Date).ToString('o'); iteration = $Iteration }
     $workObj | ConvertTo-Json -Depth 10 | Set-Content -Path $workFile -Encoding UTF8
     $completeFile = Get-StateFile -SessionId $SessionId -FileName 'work-complete.txt'
@@ -206,12 +206,12 @@ function Set-Work {
     # Iteration History Persistence
     $histDir = Join-Path (Join-Path (Get-StateDir -SessionId $SessionId) 'history') "iteration_$Iteration"
     if (-not (Test-Path $histDir)) { New-Item -ItemType Directory -Path $histDir -Force | Out-Null }
-    Copy-Item -Path $workFile -Destination (Join-Path $histDir 'work.json') -Force
+    Copy-Item -Path $workFile -Destination (Join-Path $histDir '') -Force
     $workOutFile = Get-StateFile -SessionId $SessionId -FileName 'work.out'
     if (Test-Path $workOutFile) { Copy-Item -Path $workOutFile -Destination (Join-Path $histDir 'work.out') -Force }
 }
 
-function Get-Work { param([string]$SessionId = 'default'); $workFile = Get-StateFile -SessionId $SessionId -FileName 'work.json'; if (Test-Path $workFile) { return Get-Content $workFile -Raw -Encoding UTF8 }; return '' }
+function Get-Work { param([string]$SessionId = 'default'); $workFile = Get-StateFile -SessionId $SessionId -FileName ''; if (Test-Path $workFile) { return Get-Content $workFile -Raw -Encoding UTF8 }; return '' }
 
 # =============================================================================
 # REVIEW MANAGEMENT & ITERATION HISTORY
@@ -219,7 +219,7 @@ function Get-Work { param([string]$SessionId = 'default'); $workFile = Get-State
 function Set-Review { 
     param([string]$SessionId, [string]$Decision, [string]$Feedback, [int]$Iteration)
     Ensure-StateDir -SessionId $SessionId
-    $reviewFile = Get-StateFile -SessionId $SessionId -FileName 'review.json'
+    $reviewFile = Get-StateFile -SessionId $SessionId -FileName ''
     $reviewObj = @{ decision = $Decision; feedback = $Feedback; reviewedAt = (Get-Date).ToString('o'); iteration = $Iteration }
     $reviewObj | ConvertTo-Json -Depth 10 | Set-Content -Path $reviewFile -Encoding UTF8
     $resultFile = Get-StateFile -SessionId $SessionId -FileName 'review-result.txt'
@@ -230,14 +230,14 @@ function Set-Review {
     # Iteration History Persistence
     $histDir = Join-Path (Join-Path (Get-StateDir -SessionId $SessionId) 'history') "iteration_$Iteration"
     if (-not (Test-Path $histDir)) { New-Item -ItemType Directory -Path $histDir -Force | Out-Null }
-    Copy-Item -Path $reviewFile -Destination (Join-Path $histDir 'review.json') -Force
+    Copy-Item -Path $reviewFile -Destination (Join-Path $histDir '') -Force
     $reviewOutFile = Get-StateFile -SessionId $SessionId -FileName 'review.out'
     if (Test-Path $reviewOutFile) { Copy-Item -Path $reviewOutFile -Destination (Join-Path $histDir 'review.out') -Force }
 
     if ($Decision -eq 'REVISE') { Cleanup-ForNextIteration -SessionId $SessionId }
 }
 
-function Get-Review { param([string]$SessionId = 'default'); $reviewFile = Get-StateFile -SessionId $SessionId -FileName 'review.json'; if (Test-Path $reviewFile) { return Get-Content $reviewFile -Raw -Encoding UTF8 }; return '' }
+function Get-Review { param([string]$SessionId = 'default'); $reviewFile = Get-StateFile -SessionId $SessionId -FileName ''; if (Test-Path $reviewFile) { return Get-Content $reviewFile -Raw -Encoding UTF8 }; return '' }
 function Get-ReviewResult { param([string]$SessionId = 'default'); $resultFile = Get-StateFile -SessionId $SessionId -FileName 'review-result.txt'; if (Test-Path $resultFile) { $content = Get-Content $resultFile -Raw -Encoding UTF8; return ($content | ConvertFrom-Json).decision }; return '' }
 function Get-Feedback { param([string]$SessionId = 'default'); $feedbackFile = Get-StateFile -SessionId $SessionId -FileName 'review-feedback.txt'; if (Test-Path $feedbackFile) { $content = Get-Content $feedbackFile -Raw -Encoding UTF8; return ($content | ConvertFrom-Json).feedback }; return '' }
 
@@ -356,7 +356,7 @@ function Get-Status {
 
 function Cleanup-ForNextIteration { 
     param([string]$SessionId)
-    $files = @('work-complete.txt', 'review-result.txt', 'review-feedback.txt', 'work.json', 'review.json', 'work.out', 'review.out')
+    $files = @('work-complete.txt', 'review-result.txt', 'review-feedback.txt', '', '', 'work.out', 'review.out')
     foreach ($file in $files) { 
         $path = Get-StateFile -SessionId $SessionId -FileName $file
         if (Test-Path $path) { Remove-Item $path -Force } 
@@ -392,8 +392,7 @@ function Call-WorkerLlm {
             'google'    { return $prompt | gemini --model $WorkerModel --format=text 2>$null }
             'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
             'goose' { 
-                $gooseParams = @("task=$Task")
-                if ($Feedback) { $gooseParams += "feedback=$Feedback" }
+                \$gooseParams = @("task=\$Task", "sessionId=\$SessionId")\n                if (\$Feedback) { `$gooseParams += "feedback=\$Feedback" }
                 $gooseArgs = @('run')
                 if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
                     $gooseArgs += '--recipe', $WorkGuidelines
@@ -408,7 +407,7 @@ function Call-WorkerLlm {
                 $gooseArgs += '--text', $prompt
                 $env:GOOSE_MODEL = $WorkerModel
                 $env:GOOSE_PROVIDER = $WorkerProvider
-                goose $gooseArgs 1>work.out 2>$null
+                `$stateDir = Get-StateDir -SessionId \$SessionId; Push-Location `$stateDir; goose `$gooseArgs 1>work.out 2>`$null; Pop-Location
                 if (Test-Path work.out) { return Get-Content work.out -Raw } else { return $null }
             }
             default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
@@ -427,9 +426,7 @@ function Call-ReviewerLlm {
             'google'    { return $prompt | gemini --model $ReviewerModel --format=text 2>$null } 
             'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
             'goose' { 
-                $gooseParams = @("task=$Task")
-                if ($Work) { $gooseParams += "Work=$Work" }
-                if ($Summary) { $gooseParams += "Summary=$Summary" }
+                $gooseParams = @("task=$Task", "work=$Work", "summary=$Summary", "sessionId=$SessionId")
                 $gooseArgs = @('run')
                 if ($ReviewGuidelines -and (Test-Path $ReviewGuidelines)) { 
                     $gooseArgs += '--recipe', $ReviewGuidelines
@@ -444,7 +441,7 @@ function Call-ReviewerLlm {
                 $gooseArgs += '--text', $prompt
                 $env:GOOSE_MODEL = $ReviewerModel
                 $env:GOOSE_PROVIDER = $ReviewerProvider
-                goose $gooseArgs 1>review.out 2>$null
+                `$stateDir = Get-StateDir -SessionId `$SessionId; Push-Location `$stateDir; goose `$gooseArgs 1>review.out 2>`$null; Pop-Location
                 if (Test-Path review.out) { return Get-Content review.out -Raw } else { return $null }
             }
             default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
@@ -458,9 +455,9 @@ function Call-MonitorLlm {
     if (-not $MonitorProvider) { $MonitorProvider = $script:MonitorProvider }
     if (-not $MonitorAgent) { $MonitorAgent = $script:MonitorAgent }
     # Fall back to worker settings if monitor not configured
-    if (-not $MonitorModel) { $MonitorModel = $script:WorkerModel }
-    if (-not $MonitorProvider) { $MonitorProvider = $script:WorkerProvider }
-    if (-not $MonitorAgent) { $MonitorAgent = $script:WorkerAgent }
+    if (-not \$MonitorModel) { \$config = Get-Config -SessionId \$SessionId | JsonToDict; if (\$config) { \$MonitorModel = Coalesce \$config["monitorModel"] "" }; if (-not \$MonitorModel) { \$MonitorModel = \$script:WorkerModel } }
+    if (-not \$MonitorProvider) { \$config = Get-Config -SessionId \$SessionId | JsonToDict; if (\$config) { \$MonitorProvider = Coalesce \$config["monitorProvider"] "" }; if (-not \$MonitorProvider) { \$MonitorProvider = \$script:WorkerProvider } }
+    if (-not \$MonitorAgent) { \$config = Get-Config -SessionId \$SessionId | JsonToDict; if (\$config) { \$MonitorAgent = Coalesce \$config["monitorAgent"] "" }; if (-not \$MonitorAgent) { \$MonitorAgent = \$script:WorkerAgent } }
 
     return Invoke-LlmWithRetry -RoleName 'MONITOR' -ScriptBlock {
         switch ($MonitorAgent) {
@@ -500,7 +497,7 @@ function Parse-WorkerOutput {
         } else {
             $monitorPrompt = "Extract the WORK and SUMMARY sections from the following raw agent output.`n`nIf the agent created or modified files, include the file paths and key content in WORK.`nSummarize what was accomplished in SUMMARY.`n`nOutput format:`nWORK:`n[extracted work content]`n`nSUMMARY:`n[one-line summary]`n`n---`n$Output"
         }
-        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
+        $monitorResponse = Call-MonitorLlm -Prompt \$monitorPrompt -MonitorModel \$MonitorModel -MonitorProvider \$MonitorProvider -MonitorAgent \$MonitorAgent -SessionId \$SessionId
         if ($monitorResponse) {
             $mWork2 = [regex]::Match($monitorResponse, '(?s)WORK:(.*?)SUMMARY:')
             if ($mWork2.Success) { $work = $mWork2.Groups[1].Value.Trim() }
@@ -529,7 +526,7 @@ function Parse-ReviewerOutput {
         } else {
             $monitorPrompt = "Extract the DECISION (SHIP or REVISE) and FEEDBACK from the following raw agent output.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [the review feedback]`n`n---`n$Output"
         }
-        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
+        $monitorResponse = Call-MonitorLlm -Prompt \$monitorPrompt -MonitorModel \$MonitorModel -MonitorProvider \$MonitorProvider -MonitorAgent \$MonitorAgent -SessionId \$SessionId
         if ($monitorResponse) {
             $mDecision2 = [regex]::Match($monitorResponse, '(?i)DECISION:\s*(SHIP|REVISE)')
             if ($mDecision2.Success) { $decision = $mDecision2.Groups[1].Value.ToUpper() }
@@ -563,6 +560,9 @@ function Run-Cli {
         Write-Host "  --work-guidelines FILE       Work guidelines/recipe file"
         Write-Host "  --review-guidelines FILE     Review guidelines/recipe file"
         Write-Host "  --session-id ID              Session ID (default: auto-generated)"
+        Write-Host "  --max-retries N              Max retry attempts for rate limits (default: `$env:RALPH_MAX_RETRIES)"
+        Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: `$env:RALPH_INITIAL_BACKOFF)"
+        Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"
         Write-Host "  -h, --help                   Show this help message"
         exit 0
     }
@@ -579,6 +579,9 @@ function Run-Cli {
     $monitorModel = $script:MonitorModel
     $monitorProvider = $script:MonitorProvider
     $monitorAgent = $script:MonitorAgent
+    $maxRetries = $script:MaxRetries
+    $initialBackoff = $script:InitialBackoff
+    $throttleDelay = $script:ThrottleDelay
 
     # Parse command line arguments.
     # Flags are consumed by name; the last positional (non-flag) argument is the task.
@@ -599,13 +602,21 @@ function Run-Cli {
             '--monitor-model' { $monitorModel = $cliArgs[$i+1]; $i++ }
             '--monitor-provider' { $monitorProvider = $cliArgs[$i+1]; $i++ }
             '--monitor-agent' { $monitorAgent = $cliArgs[$i+1]; $i++ }
+            '--max-retries' { $maxRetries = [int]$cliArgs[$i+1]; $i++ }
+            '--initial-backoff' { $initialBackoff = [int]$cliArgs[$i+1]; $i++ }
+            '--throttle-delay' { $throttleDelay = [int]$cliArgs[$i+1]; $i++ }
             default { $positionalArgs += $cliArgs[$i] }
         }
     }
     # Last positional argument is the task
     $taskInput = if ($positionalArgs.Count -gt 0) { $positionalArgs[-1] } else { '' }
     $task = if (Test-Path $taskInput) { Get-Content $taskInput -Raw } else { $taskInput }
-    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 \"task description\" or .\ralph-loop-runner.ps1 path/to/task.md" -ForegroundColor Red; exit 1 }
+    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; exit 1 }
+
+    # Update script-level retry config from CLI options
+    $script:MaxRetries = $maxRetries
+    $script:InitialBackoff = $initialBackoff
+    $script:ThrottleDelay = $throttleDelay
 
     if (-not $workerModel) { Write-Host -NoNewline "Worker model: "; $workerModel = Read-Host; if (-not $workerModel) { exit 1 } }
     if (-not $workerProvider) { Write-Host -NoNewline "Worker provider (anthropic/openai/google/goose/copilot): "; $workerProvider = Read-Host; if (-not $workerProvider) { exit 1 } }
@@ -638,7 +649,7 @@ function Run-Cli {
     $feedback = ''
     $iteration = 1
 
-    $maxIter = if ($maxIterations -eq -1) { 999999 } else { $maxIterations }
+    $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
 
     for ($i = 1; $i -le $maxIter; $i++) {
         $iteration = $i
@@ -652,7 +663,7 @@ function Run-Cli {
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
         
         if ($workerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $workerOutput)) {
-            Write-Host "XX WORK PHASE FAILED - Rate limit, quota error, or no output from worker" -ForegroundColor Red
+            Write-Host "[ERROR] WORK PHASE FAILED - Rate limit, quota error, or no output from worker" -ForegroundColor Red
             Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
             exit 1
         }
@@ -661,9 +672,9 @@ function Run-Cli {
         $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
         $workerOutput | Out-File -FilePath $workOutFile -Encoding UTF8
 
-        $parsed = Parse-WorkerOutput -Output $workerOutput -OutputFile $workOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        $parsed = Parse-WorkerOutput -Output \$workerOutput -OutputFile \$workOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
         $work = $parsed.work; $summary = $parsed.summary
-        if (-not $work -or -not $summary) { Write-Host "XX WORK PHASE FAILED - Could not parse output" -ForegroundColor Red; exit 1 }
+        if (-not $work -or -not $summary) { Write-Host "[ERROR] WORK PHASE FAILED - Could not parse output" -ForegroundColor Red; exit 1 }
 
         Set-Work -SessionId $sessionId -Work $work -Summary $summary -Iteration $iteration
         Write-Host "Work submitted. Summary: $summary"
@@ -675,7 +686,7 @@ function Run-Cli {
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
         
         if ($reviewerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $reviewerOutput)) {
-            Write-Host "XX REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" -ForegroundColor Red
+            Write-Host "[ERROR] REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" -ForegroundColor Red
             Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
             exit 1
         }
@@ -684,9 +695,9 @@ function Run-Cli {
         $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
         $reviewerOutput | Out-File -FilePath $reviewOutFile -Encoding UTF8
 
-        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -OutputFile $reviewOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        $parsed = Parse-ReviewerOutput -Output \$reviewerOutput -OutputFile \$reviewOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
         $decision = $parsed.decision; $feedback = $parsed.feedback
-        if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { Write-Host "XX REVIEW PHASE FAILED - Invalid decision: $decision" -ForegroundColor Red; exit 1 }
+        if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { Write-Host "[ERROR] REVIEW PHASE FAILED - Invalid decision: $decision" -ForegroundColor Red; exit 1 }
 
         Set-Review -SessionId $sessionId -Decision $decision -Feedback $feedback -Iteration $iteration
 
@@ -706,7 +717,7 @@ function Run-Cli {
         }
     }
 
-    Write-Host "XX Max iterations ($maxIterations) reached" -ForegroundColor Red
+    Write-Host "[ERROR] Max iterations ($maxIterations) reached" -ForegroundColor Red
     exit 1
 }
 
@@ -949,7 +960,7 @@ function Handle-Run {
         $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
         $workerOutput | Out-File -FilePath $workOutFile -Encoding UTF8
 
-        $parsed = Parse-WorkerOutput -Output $workerOutput -OutputFile $workOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        $parsed = Parse-WorkerOutput -Output \$workerOutput -OutputFile \$workOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
         $work = $parsed.work; $summary = $parsed.summary
         if (-not $work -or -not $summary) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Could not parse output' } }
 
@@ -968,7 +979,7 @@ function Handle-Run {
         $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
         $reviewerOutput | Out-File -FilePath $reviewOutFile -Encoding UTF8
 
-        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -OutputFile $reviewOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+        $parsed = Parse-ReviewerOutput -Output \$reviewerOutput -OutputFile \$reviewOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
         $decision = $parsed.decision; $feedback = $parsed.feedback
         if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Invalid decision: ' + $decision } }
 
@@ -1196,3 +1207,33 @@ if ($args.Count -gt 0) {
         }
     } catch { Write-Error $_ }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
