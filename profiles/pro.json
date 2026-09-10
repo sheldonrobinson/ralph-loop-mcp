@@ -1,14 +1,14 @@
 {
     "reviewGuidelines":  "",
     "maxIterations":  15,
-    "monitorModel":  "claude-3-opus-20240229",
+    "monitorModel":  "nvidia/nemotron-3.5-lightning-30b-a3b",
     "reviewerAgent":  "goose",
     "workGuidelines":  "",
-    "reviewerModel":  "gpt-4",
-    "workerProvider":  "anthropic",
+    "reviewerModel":  "google/gemma-4-31b-it",
+    "workerProvider":  "nvidia",
     "monitorAgent":  "goose",
-    "monitorProvider":  "anthropic",
-    "workerModel":  "claude-3-opus-20240229",
+    "monitorProvider":  "nvidia",
+    "workerModel":  "nvidia/nemotron-3-ultra-550b-a55b",
     "workerAgent":  "goose",
-    "reviewerProvider":  "openai"
+    "reviewerProvider":  "nvidia"
 }
