@@ -1,4 +1,4 @@
-﻿[EMOJI]\\\#!/usr/bin/env bash
+#!/usr/bin/env bash
 # ralph-loop-runner - Bash Implementation (Unified: MCP Server + CLI Orchestration)
 # Cross-platform implementation of the Ralph Loop iterative development technique
 # For Linux/macOS
@@ -714,7 +714,7 @@ SUMMARY:
             if [[ -n "${work_guidelines}" && -f "${work_guidelines}" ]]; then
                 goose_args+=("--recipe" "${work_guidelines}")
             fi
-            local params_str="task=\${task} sessionId=\${session_id}"
+            local params_str="task=${task} sessionId=${session_id}"
             if [[ -n "${feedback}" ]]; then
                 params_str+=" feedback=${feedback}"
             fi
@@ -1298,9 +1298,9 @@ handle_initialize() {
     reviewer_model=$(echo "${params}" | jq -r '.reviewerModel // empty')
     reviewer_provider=$(echo "${params}" | jq -r '.reviewerProvider // empty')
     reviewer_agent=$(echo "${params}" | jq -r '.reviewerAgent // "goose"')
-    monitor_model=$(echo "${params}" | jq -r '.monitorModel // \$RALPH_MONITOR_MODEL // empty')
-    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // \$RALPH_MONITOR_PROVIDER // empty')
-    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // \$RALPH_MONITOR_AGENT // "goose"')
+    monitor_model=$(echo "${params}" | jq -r --arg m "${MONITOR_MODEL:-}" '.monitorModel // $m // empty')
+    monitor_provider=$(echo "${params}" | jq -r --arg p "${MONITOR_PROVIDER:-}" '.monitorProvider // $p // empty')
+    monitor_agent=$(echo "${params}" | jq -r --arg a "${MONITOR_AGENT:-goose}" '.monitorAgent // $a // "goose"')
     cross_model_enforced=$(echo "${params}" | jq -r '.crossModelReviewEnforced // true')
     work_guidelines=$(echo "${params}" | jq -r '.workGuidelines // empty')
     review_guidelines=$(echo "${params}" | jq -r '.reviewGuidelines // empty')
@@ -1564,9 +1564,9 @@ handle_run() {
     cross_model_enforced=$(echo "${params}" | jq -r '.crossModelReviewEnforced // true')
     work_guidelines=$(echo "${params}" | jq -r '.workGuidelines // empty')
     review_guidelines=$(echo "${params}" | jq -r '.reviewGuidelines // empty')
-    monitor_model=$(echo "${params}" | jq -r '.monitorModel // \$RALPH_MONITOR_MODEL // empty')
-    monitor_provider=$(echo "${params}" | jq -r '.monitorProvider // \$RALPH_MONITOR_PROVIDER // empty')
-    monitor_agent=$(echo "${params}" | jq -r '.monitorAgent // \$RALPH_MONITOR_AGENT // "goose"')
+    monitor_model=$(echo "${params}" | jq -r --arg m "${MONITOR_MODEL:-}" '.monitorModel // $m // empty')
+    monitor_provider=$(echo "${params}" | jq -r --arg p "${MONITOR_PROVIDER:-}" '.monitorProvider // $p // empty')
+    monitor_agent=$(echo "${params}" | jq -r --arg a "${MONITOR_AGENT:-goose}" '.monitorAgent // $a // "goose"')
     
     if [[ -z "${task}" ]]; then
         echo $(json_response "${id}" "" '{"code":-32602,"message":"Task is required"}')

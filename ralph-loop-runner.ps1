@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 function Coalesce { param($Value, $Default); if ($null -ne $Value -and $Value -ne '') { return $Value }; return $Default }
 
 # Helper: Safely convert JSON to dictionary
-function JsonToDict \{ param(\[string\]\$Json); \$obj = \$Json \| ConvertFrom-Json; if (\$obj -isnot \[System.Management.Automation.PSCustomObject\]) \{ return @\{ value = \$obj \} \}; \$dict = @\{\}; foreach (\$prop in \$obj.PSObject.Properties) \{ \$val = \$prop.Value; if (\$val -is \[System.Management.Automation.PSCustomObject\]) \{ \$val = \$val \| ConvertTo-Json -Depth 10 \| ConvertFrom-Json \}; \$dict\[\$prop.Name\] = \$val \}; return \$dict \}
+function JsonToDict { param([string]$Json); $obj = $Json | ConvertFrom-Json; if ($obj -isnot [System.Management.Automation.PSCustomObject]) { return @{ value = $obj } }; $dict = @{}; foreach ($prop in $obj.PSObject.Properties) { $val = $prop.Value; if ($val -is [System.Management.Automation.PSCustomObject]) { $val = $val | ConvertTo-Json -Depth 10 | ConvertFrom-Json }; $dict[$prop.Name] = $val }; return $dict }
 
 # Ensure jq is available
 if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
@@ -418,7 +418,8 @@ function Call-WorkerLlm {
             'google'    { return $prompt | gemini --model $WorkerModel --format=text 2>$null }
             'copilot'   { return $prompt | copilot -p --allow-all-tools 2>$null } 
             'goose' { 
-                \$gooseParams = @("task=\$Task", "sessionId=\$SessionId")\n                if (\$Feedback) { `$gooseParams += "feedback=\$Feedback" }
+                $gooseParams = @("task=$Task", "sessionId=$SessionId")
+                if ($Feedback) { $gooseParams += "feedback=$Feedback" }
                 $gooseArgs = @('run')
                 if ($WorkGuidelines -and (Test-Path $WorkGuidelines)) { 
                     $gooseArgs += '--recipe', $WorkGuidelines
@@ -433,7 +434,7 @@ function Call-WorkerLlm {
                 $gooseArgs += '--text', $prompt
                 $env:GOOSE_MODEL = $WorkerModel
                 $env:GOOSE_PROVIDER = $WorkerProvider
-                `$stateDir = Get-StateDir -SessionId \$SessionId; Push-Location `$stateDir; goose `$gooseArgs 1>work.out 2>`$null; Pop-Location
+                $stateDir = Get-StateDir -SessionId $SessionId; Push-Location $stateDir; goose $gooseArgs 1>work.out 2>$null; Pop-Location
                 if (Test-Path work.out) { return Get-Content work.out -Raw } else { return $null }
             }
             default { Write-Host "Error: Unknown provider $WorkerProvider" -ForegroundColor Red; return $null } 
@@ -467,7 +468,7 @@ function Call-ReviewerLlm {
                 $gooseArgs += '--text', $prompt
                 $env:GOOSE_MODEL = $ReviewerModel
                 $env:GOOSE_PROVIDER = $ReviewerProvider
-                `$stateDir = Get-StateDir -SessionId `$SessionId; Push-Location `$stateDir; goose `$gooseArgs 1>review.out 2>`$null; Pop-Location
+                $stateDir = Get-StateDir -SessionId $SessionId; Push-Location $stateDir; goose $gooseArgs 1>review.out 2>$null; Pop-Location
                 if (Test-Path review.out) { return Get-Content review.out -Raw } else { return $null }
             }
             default { Write-Host "Error: Unknown provider $ReviewerProvider" -ForegroundColor Red; return $null } 
@@ -481,9 +482,9 @@ function Call-MonitorLlm {
     if (-not $MonitorProvider) { $MonitorProvider = $script:MonitorProvider }
     if (-not $MonitorAgent) { $MonitorAgent = $script:MonitorAgent }
     # Fall back to worker settings if monitor not configured
-    if (-not \$MonitorModel) { \$config = Get-Config -SessionId \$SessionId | JsonToDict; if (\$config) { \$MonitorModel = Coalesce \$config["monitorModel"] "" }; if (-not \$MonitorModel) { \$MonitorModel = \$script:WorkerModel } }
-    if (-not \$MonitorProvider) { \$config = Get-Config -SessionId \$SessionId | JsonToDict; if (\$config) { \$MonitorProvider = Coalesce \$config["monitorProvider"] "" }; if (-not \$MonitorProvider) { \$MonitorProvider = \$script:WorkerProvider } }
-    if (-not \$MonitorAgent) { \$config = Get-Config -SessionId \$SessionId | JsonToDict; if (\$config) { \$MonitorAgent = Coalesce \$config["monitorAgent"] "" }; if (-not \$MonitorAgent) { \$MonitorAgent = \$script:WorkerAgent } }
+    if (-not $MonitorModel) { $config = Get-Config -SessionId $SessionId | JsonToDict; if ($config) { $MonitorModel = Coalesce $config["monitorModel"] "" }; if (-not $MonitorModel) { $MonitorModel = $script:WorkerModel } }
+    if (-not $MonitorProvider) { $config = Get-Config -SessionId $SessionId | JsonToDict; if ($config) { $MonitorProvider = Coalesce $config["monitorProvider"] "" }; if (-not $MonitorProvider) { $MonitorProvider = $script:WorkerProvider } }
+    if (-not $MonitorAgent) { $config = Get-Config -SessionId $SessionId | JsonToDict; if ($config) { $MonitorAgent = Coalesce $config["monitorAgent"] "" }; if (-not $MonitorAgent) { $MonitorAgent = $script:WorkerAgent } }
 
     return Invoke-LlmWithRetry -RoleName 'MONITOR' -ScriptBlock {
         switch ($MonitorAgent) {
@@ -523,7 +524,7 @@ function Parse-WorkerOutput {
         } else {
             $monitorPrompt = "Extract the WORK and SUMMARY sections from the following raw agent output.`n`nIf the agent created or modified files, include the file paths and key content in WORK.`nSummarize what was accomplished in SUMMARY.`n`nOutput format:`nWORK:`n[extracted work content]`n`nSUMMARY:`n[one-line summary]`n`n---`n$Output"
         }
-        $monitorResponse = Call-MonitorLlm -Prompt \$monitorPrompt -MonitorModel \$MonitorModel -MonitorProvider \$MonitorProvider -MonitorAgent \$MonitorAgent -SessionId \$SessionId
+        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
         if ($monitorResponse) {
             $mWork2 = [regex]::Match($monitorResponse, '(?s)WORK:(.*?)SUMMARY:')
             if ($mWork2.Success) { $work = $mWork2.Groups[1].Value.Trim() }
@@ -552,7 +553,7 @@ function Parse-ReviewerOutput {
         } else {
             $monitorPrompt = "Extract the DECISION (SHIP or REVISE) and FEEDBACK from the following raw agent output.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [the review feedback]`n`n---`n$Output"
         }
-        $monitorResponse = Call-MonitorLlm -Prompt \$monitorPrompt -MonitorModel \$MonitorModel -MonitorProvider \$MonitorProvider -MonitorAgent \$MonitorAgent -SessionId \$SessionId
+        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
         if ($monitorResponse) {
             $mDecision2 = [regex]::Match($monitorResponse, '(?i)DECISION:\s*(SHIP|REVISE)')
             if ($mDecision2.Success) { $decision = $mDecision2.Groups[1].Value.ToUpper() }
@@ -756,7 +757,7 @@ function Run-Cli {
     # Last positional argument is the task
     $taskInput = if ($positionalArgs.Count -gt 0) { $positionalArgs[-1] } else { '' }
     $task = if (Test-Path $taskInput) { Get-Content $taskInput -Raw } else { $taskInput }
-    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; Write-Host ""; Write-Host "Options:" -ForegroundColor Cyan; Write-Host "  --worker-model MODEL         Worker model (default: \$RALPH_WORKER_MODEL)"; Write-Host "  --worker-provider PROVIDER   Worker provider (default: \$RALPH_WORKER_PROVIDER)"; Write-Host "  --worker-agent AGENT         Worker agent (default: \$RALPH_WORKER_AGENT)"; Write-Host "  --reviewer-model MODEL       Reviewer model (default: \$RALPH_REVIEWER_MODEL)"; Write-Host "  --reviewer-provider PROVIDER Reviewer provider (default: \$RALPH_REVIEWER_PROVIDER)"; Write-Host "  --reviewer-agent AGENT       Reviewer agent (default: \$RALPH_REVIEWER_AGENT)"; Write-Host "  --monitor-model MODEL        Monitor model (default: \$RALPH_MONITOR_MODEL)"; Write-Host "  --monitor-provider PROVIDER  Monitor provider (default: \$RALPH_MONITOR_PROVIDER)"; Write-Host "  --monitor-agent AGENT        Monitor agent (default: \$RALPH_MONITOR_AGENT)"; Write-Host "  --max-iterations N           Max iterations, -1 for infinite (default: \$RALPH_MAX_ITERATIONS)"; Write-Host "  --work-guidelines FILE       Work guidelines/recipe file (default: \$RALPH_WORK_GUIDELINES)"; Write-Host "  --review-guidelines FILE     Review guidelines/recipe file (default: \$RALPH_REVIEW_GUIDELINES)"; Write-Host "  --session-id ID              Session ID (default: auto-generated)"; Write-Host "  --max-retries N              Max retry attempts for rate limits (default: \$RALPH_MAX_RETRIES)"; Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: \$RALPH_INITIAL_BACKOFF)"; Write-Host "  --throttle-delay N           Delay between requests in seconds (default: \$RALPH_THROTTLE_DELAY)"; Write-Host "  --enable-adaptive            Enable adaptive profile switching based on rate limits, quota errors, resource exhaustion, and iteration progress"; exit 1 }
+    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; Write-Host ""; Write-Host "Options:" -ForegroundColor Cyan; Write-Host "  --worker-model MODEL         Worker model (default: `$env:RALPH_WORKER_MODEL)"; Write-Host "  --worker-provider PROVIDER   Worker provider (default: `$env:RALPH_WORKER_PROVIDER)"; Write-Host "  --worker-agent AGENT         Worker agent (default: `$env:RALPH_WORKER_AGENT)"; Write-Host "  --reviewer-model MODEL       Reviewer model (default: `$env:RALPH_REVIEWER_MODEL)"; Write-Host "  --reviewer-provider PROVIDER Reviewer provider (default: `$env:RALPH_REVIEWER_PROVIDER)"; Write-Host "  --reviewer-agent AGENT       Reviewer agent (default: `$env:RALPH_REVIEWER_AGENT)"; Write-Host "  --monitor-model MODEL        Monitor model (default: `$env:RALPH_MONITOR_MODEL)"; Write-Host "  --monitor-provider PROVIDER  Monitor provider (default: `$env:RALPH_MONITOR_PROVIDER)"; Write-Host "  --monitor-agent AGENT        Monitor agent (default: `$env:RALPH_MONITOR_AGENT)"; Write-Host "  --max-iterations N           Max iterations, -1 for infinite (default: `$env:RALPH_MAX_ITERATIONS)"; Write-Host "  --work-guidelines FILE       Work guidelines/recipe file (default: `$env:RALPH_WORK_GUIDELINES)"; Write-Host "  --review-guidelines FILE     Review guidelines/recipe file (default: `$env:RALPH_REVIEW_GUIDELINES)"; Write-Host "  --session-id ID              Session ID (default: auto-generated)"; Write-Host "  --max-retries N              Max retry attempts for rate limits (default: `$env:RALPH_MAX_RETRIES)"; Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: `$env:RALPH_INITIAL_BACKOFF)"; Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"; Write-Host "  --enable-adaptive            Enable adaptive profile switching based on rate limits, quota errors, resource exhaustion, and iteration progress"; exit 1 }
 
     # Update script-level retry config from CLI options
     $script:MaxRetries = $maxRetries
@@ -836,7 +837,7 @@ function Run-Cli {
         $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
         $workerOutput | Out-File -FilePath $workOutFile -Encoding UTF8
 
-        $parsed = Parse-WorkerOutput -Output \$workerOutput -OutputFile \$workOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
+        $parsed = Parse-WorkerOutput -Output $workerOutput -OutputFile $workOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -SessionId $sessionId
         $work = $parsed.work; $summary = $parsed.summary
         if (-not $work -or -not $summary) { Write-Host "[ERROR] WORK PHASE FAILED - Could not parse output" -ForegroundColor Red; exit 1 }
 
@@ -875,7 +876,7 @@ function Run-Cli {
         $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
         $reviewerOutput | Out-File -FilePath $reviewOutFile -Encoding UTF8
 
-        $parsed = Parse-ReviewerOutput -Output \$reviewerOutput -OutputFile \$reviewOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
+        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -OutputFile $reviewOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -SessionId $sessionId
         $decision = $parsed.decision; $feedback = $parsed.feedback
         if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { Write-Host "[ERROR] REVIEW PHASE FAILED - Invalid decision: $decision" -ForegroundColor Red; exit 1 }
 
@@ -1154,7 +1155,7 @@ function Handle-Run {
         $workOutFile = Get-StateFile -SessionId $sessionId -FileName 'work.out'
         $workerOutput | Out-File -FilePath $workOutFile -Encoding UTF8
 
-        $parsed = Parse-WorkerOutput -Output \$workerOutput -OutputFile \$workOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
+        $parsed = Parse-WorkerOutput -Output $workerOutput -OutputFile $workOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -SessionId $sessionId
         $work = $parsed.work; $summary = $parsed.summary
         if (-not $work -or -not $summary) { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Could not parse output' } }
 
@@ -1173,7 +1174,7 @@ function Handle-Run {
         $reviewOutFile = Get-StateFile -SessionId $sessionId -FileName 'review.out'
         $reviewerOutput | Out-File -FilePath $reviewOutFile -Encoding UTF8
 
-        $parsed = Parse-ReviewerOutput -Output \$reviewerOutput -OutputFile \$reviewOutFile -MonitorModel \$monitorModel -MonitorProvider \$monitorProvider -MonitorAgent \$monitorAgent -SessionId \$sessionId
+        $parsed = Parse-ReviewerOutput -Output $reviewerOutput -OutputFile $reviewOutFile -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -SessionId $sessionId
         $decision = $parsed.decision; $feedback = $parsed.feedback
         if ($decision -ne 'SHIP' -and $decision -ne 'REVISE') { return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Invalid decision: ' + $decision } }
 
