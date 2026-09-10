@@ -31,6 +31,8 @@ REVIEW_GUIDELINES="${RALPH_REVIEW_GUIDELINES:-${RALPH_RECIPE_DIR}/ralph-review.y
 MONITOR_MODEL="${RALPH_MONITOR_MODEL:-}"
 MONITOR_PROVIDER="${RALPH_MONITOR_PROVIDER:-}"
 MONITOR_AGENT="${RALPH_MONITOR_AGENT:-goose}"
+# Profile support placeholder
+
 
 # CLI argument defaults (can be overridden by command line)
 CLI_TASK=""

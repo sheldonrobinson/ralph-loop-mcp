@@ -380,16 +380,16 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `RALPH_WORKER_MODEL` | Worker model name | — |
-| `RALPH_WORKER_PROVIDER` | Worker provider (anthropic/openai/google/copilot/goose) | — |
+| `RALPH_WORKER_PROVIDER` | Override the worker provider for this run. Available providers include anthropic, openai, google, copilot, goose, and others. | — |
 | `RALPH_WORKER_AGENT` | Worker agent (goose/claude/openai/gemini/copilot) | goose |
 | `RALPH_REVIEWER_MODEL` | Reviewer model name | — |
-| `RALPH_REVIEWER_PROVIDER` | Reviewer provider (anthropic/openai/google/copilot/goose) | — |
+| `RALPH_REVIEWER_PROVIDER` | Override the reviewer provider for this run. Available providers include anthropic, openai, google, copilot, goose, and others. | — |
 | `RALPH_REVIEWER_AGENT` | Reviewer agent (goose/claude/openai/gemini/copilot) | goose |
 | `RALPH_MAX_ITERATIONS` | Max iterations (-1 for unlimited) | 10 |
 | `RALPH_WORK_GUIDELINES` | Path to work guidelines/recipe | `$RALPH_RECIPE_DIR/ralph-work.yaml` |
 | `RALPH_REVIEW_GUIDELINES` | Path to review guidelines/recipe | `$RALPH_RECIPE_DIR/ralph-review.yaml` |
 | `RALPH_MONITOR_MODEL` | Monitor model name | — |
-| `RALPH_MONITOR_PROVIDER` | Monitor provider (anthropic/openai/google/copilot/goose) | — |
+| `RALPH_MONITOR_PROVIDER` | Override the monitor provider for this run. Available providers include anthropic, openai, google, copilot, goose, and others. | — |
 | `RALPH_MONITOR_AGENT` | Monitor agent (goose/claude/openai/gemini/copilot) | goose |
 | `RALPH_MAX_RETRIES` | Max retries for rate limits / quota errors | 3 |
 | `RALPH_INITIAL_BACKOFF` | Initial retry backoff delay in seconds | 5 |
@@ -401,13 +401,13 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 | Argument | Description |
 |----------|-------------|
 | `--worker-model MODEL` | Worker model name |
-| `--worker-provider PROVIDER` | Worker provider (anthropic/openai/google/copilot/goose) |
+| `--worker-provider PROVIDER` | Override the worker provider for this run. Available providers include anthropic, openai, google, copilot, goose, and others. |
 | `--worker-agent AGENT` | Worker agent (goose/claude/openai/gemini/copilot) |
 | `--reviewer-model MODEL` | Reviewer model name |
-| `--reviewer-provider PROVIDER` | Reviewer provider (anthropic/openai/google/copilot/goose) |
+| `--reviewer-provider PROVIDER` | Override the reviewer provider for this run. Available providers include anthropic, openai, google, copilot, goose, and others. |
 | `--reviewer-agent AGENT` | Reviewer agent (goose/claude/openai/gemini/copilot) |
 | `--monitor-model MODEL` | Monitor model name |
-| `--monitor-provider PROVIDER` | Monitor provider (anthropic/openai/google/copilot/goose) |
+| `--monitor-provider PROVIDER` | Override the monitor provider for this run. Available providers include anthropic, openai, google, copilot, goose, and others. |
 | `--monitor-agent AGENT` | Monitor agent (goose/claude/openai/gemini/copilot) |
 | `--max-iterations N` | Max iterations (-1 for unlimited) |
 | `--work-guidelines FILE` | Work guidelines/recipe file |

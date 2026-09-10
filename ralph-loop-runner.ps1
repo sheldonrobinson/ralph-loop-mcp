@@ -52,6 +52,28 @@ $script:MonitorModel = Coalesce $env:RALPH_MONITOR_MODEL ''
 $script:MonitorProvider = Coalesce $env:RALPH_MONITOR_PROVIDER ''
 $script:MonitorAgent = Coalesce $env:RALPH_MONITOR_AGENT 'goose'
 
+# Profile support via environment variable
+if ($env:RALPH_PROFILE -and (Test-Path $env:RALPH_PROFILE)) {
+    try {
+        $profile = Get-Content $env:RALPH_PROFILE -Raw | ConvertFrom-Json
+        if ($profile.workerModel) { $script:WorkerModel = $profile.workerModel }
+        if ($profile.workerProvider) { $script:WorkerProvider = $profile.workerProvider }
+        if ($profile.workerAgent) { $script:WorkerAgent = $profile.workerAgent }
+        if ($profile.reviewerModel) { $script:ReviewerModel = $profile.reviewerModel }
+        if ($profile.reviewerProvider) { $script:ReviewerProvider = $profile.reviewerProvider }
+        if ($profile.reviewerAgent) { $script:ReviewerAgent = $profile.reviewerAgent }
+        if ($profile.monitorModel) { $script:MonitorModel = $profile.monitorModel }
+        if ($profile.monitorProvider) { $script:MonitorProvider = $profile.monitorProvider }
+        if ($profile.monitorAgent) { $script:MonitorAgent = $profile.monitorAgent }
+        if ($profile.maxIterations) { $script:MaxIterations = [int]$profile.maxIterations }
+        if ($profile.workGuidelines) { $script:WorkGuidelines = $profile.workGuidelines }
+        if ($profile.reviewGuidelines) { $script:ReviewGuidelines = $profile.reviewGuidelines }
+    }
+    catch {
+        Write-Error "Failed to load profile from '$env:RALPH_PROFILE': $_" 
+    }
+}
+
 # CLI argument placeholders
 $script:CLITask = ''
 $script:CLISessionId = ''

@@ -1,0 +1,14 @@
+{
+    "reviewGuidelines":  "",
+    "maxIterations":  20,
+    "monitorModel":  "claude-3-opus-20240229",
+    "reviewerAgent":  "goose",
+    "workGuidelines":  "",
+    "reviewerModel":  "gemini-1.5-pro-latest",
+    "workerProvider":  "anthropic",
+    "monitorAgent":  "goose",
+    "monitorProvider":  "anthropic",
+    "workerModel":  "claude-3-opus-20240229",
+    "workerAgent":  "goose",
+    "reviewerProvider":  "google"
+}

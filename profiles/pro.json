@@ -1,0 +1,14 @@
+{
+    "reviewGuidelines":  "",
+    "maxIterations":  15,
+    "monitorModel":  "claude-3-opus-20240229",
+    "reviewerAgent":  "goose",
+    "workGuidelines":  "",
+    "reviewerModel":  "gpt-4",
+    "workerProvider":  "anthropic",
+    "monitorAgent":  "goose",
+    "monitorProvider":  "anthropic",
+    "workerModel":  "claude-3-opus-20240229",
+    "workerAgent":  "goose",
+    "reviewerProvider":  "openai"
+}
