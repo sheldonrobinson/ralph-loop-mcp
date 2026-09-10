@@ -72,6 +72,9 @@ if ($env:RALPH_PROFILE -and (Test-Path $env:RALPH_PROFILE)) {
     catch {
         Write-Error "Failed to load profile from '$env:RALPH_PROFILE': $_" 
     }
+    # Extract profile name from path for adaptive tracking
+    $currentProfile = Split-Path $env:RALPH_PROFILE -Leaf
+    $currentProfile = $currentProfile -replace '\.json$', ''
 }
 
 # CLI argument placeholders
@@ -604,6 +607,95 @@ function Run-Cli {
     $maxRetries = $script:MaxRetries
     $initialBackoff = $script:InitialBackoff
     $throttleDelay = $script:ThrottleDelay
+    $enableAdaptive = $false
+    $currentProfile = ''
+
+    # Helper function to test if adaptive profile switch is needed
+    function Test-AdaptiveProfileSwitch {
+        param(
+            [string]$SessionId,
+            [int]$CurrentIteration,
+            [string]$WorkerOutput,
+            [string]$ReviewerOutput,
+            [string]$Feedback,
+            [string]$CurrentProfile
+        )
+        
+        # Get current profile's max iterations
+        $config = Get-Config -SessionId $SessionId | JsonToDict
+        $currentMaxIter = Coalesce $config['maxIterations'] 10
+        
+        # Check for rate limit / quota errors in worker output
+        if ($WorkerOutput -and ($WorkerOutput -match '(?i)(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled)')) {
+            # Rate limit detected - switch to higher tier if available
+            if ($CurrentProfile -ne 'ultra') {
+                return 'ultra'
+            }
+        }
+        
+        # Check for rate limit / quota errors in reviewer output
+        if ($ReviewerOutput -and ($ReviewerOutput -match '(?i)(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled)')) {
+            if ($CurrentProfile -ne 'ultra') {
+                return 'ultra'
+            }
+        }
+        
+        # Check for resource exhaustion in feedback
+        if ($Feedback -and ($Feedback -match '(?i)(resource|memory|cpu|quota|limit)')) {
+            if ($CurrentProfile -ne 'ultra') {
+                return 'ultra'
+            }
+        }
+        
+        # Check iteration count - if we're past 50% of max iterations and not on highest tier
+        if ($CurrentIteration -gt ($currentMaxIter / 2) -and $CurrentProfile -ne 'ultra' -and $CurrentProfile -ne 'super') {
+            return 'super'
+        }
+        
+        # Check if we're past 75% of max iterations and not on highest tier
+        if ($CurrentIteration -gt (0.75 * $currentMaxIter) -and $CurrentProfile -ne 'ultra') {
+            return 'ultra'
+        }
+        
+        return $null
+    }
+
+    # Helper function to apply a profile
+    function Apply-Profile {
+        param(
+            [string]$SessionId,
+            [string]$ProfileName
+        )
+        
+        $profilePath = "profiles/$ProfileName.json"
+        if (-not (Test-Path $profilePath)) {
+            Write-Host "[ERROR] Profile file not found: $profilePath" -ForegroundColor Red
+            return
+        }
+        
+        $profile = Get-Content $profilePath -Raw | ConvertFrom-Json
+        
+        # Update config with profile settings
+        $config = @{
+            workerModel = $profile.workerModel
+            workerProvider = $profile.workerProvider
+            workerAgent = $profile.workerAgent
+            reviewerModel = $profile.reviewerModel
+            reviewerProvider = $profile.reviewerProvider
+            reviewerAgent = $profile.reviewerAgent
+            monitorModel = $profile.monitorModel
+            monitorProvider = $profile.monitorProvider
+            monitorAgent = $profile.monitorAgent
+            maxIterations = $profile.maxIterations
+            crossModelReviewEnforced = $true
+            workGuidelines = $profile.workGuidelines
+            reviewGuidelines = $profile.reviewGuidelines
+            configuredAt = (Get-Date).ToString('o')
+        }
+        $config | ConvertTo-Json -Depth 10 | Set-Content -Path (Get-StateFile -SessionId $SessionId -FileName 'config.json') -Encoding UTF8
+        
+        Write-Host "[ADAPTIVE] Applied profile: $ProfileName" -ForegroundColor Green
+    }
 
     # Parse command line arguments.
     # Flags are consumed by name; the last positional (non-flag) argument is the task.
@@ -627,13 +719,14 @@ function Run-Cli {
             '--max-retries' { $maxRetries = [int]$cliArgs[$i+1]; $i++ }
             '--initial-backoff' { $initialBackoff = [int]$cliArgs[$i+1]; $i++ }
             '--throttle-delay' { $throttleDelay = [int]$cliArgs[$i+1]; $i++ }
+            '--enable-adaptive' { $enableAdaptive = $true }
             default { $positionalArgs += $cliArgs[$i] }
         }
     }
     # Last positional argument is the task
     $taskInput = if ($positionalArgs.Count -gt 0) { $positionalArgs[-1] } else { '' }
     $task = if (Test-Path $taskInput) { Get-Content $taskInput -Raw } else { $taskInput }
-    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; exit 1 }
+    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; Write-Host ""; Write-Host "Options:" -ForegroundColor Cyan; Write-Host "  --worker-model MODEL         Worker model (default: \$RALPH_WORKER_MODEL)"; Write-Host "  --worker-provider PROVIDER   Worker provider (default: \$RALPH_WORKER_PROVIDER)"; Write-Host "  --worker-agent AGENT         Worker agent (default: \$RALPH_WORKER_AGENT)"; Write-Host "  --reviewer-model MODEL       Reviewer model (default: \$RALPH_REVIEWER_MODEL)"; Write-Host "  --reviewer-provider PROVIDER Reviewer provider (default: \$RALPH_REVIEWER_PROVIDER)"; Write-Host "  --reviewer-agent AGENT       Reviewer agent (default: \$RALPH_REVIEWER_AGENT)"; Write-Host "  --monitor-model MODEL        Monitor model (default: \$RALPH_MONITOR_MODEL)"; Write-Host "  --monitor-provider PROVIDER  Monitor provider (default: \$RALPH_MONITOR_PROVIDER)"; Write-Host "  --monitor-agent AGENT        Monitor agent (default: \$RALPH_MONITOR_AGENT)"; Write-Host "  --max-iterations N           Max iterations, -1 for infinite (default: \$RALPH_MAX_ITERATIONS)"; Write-Host "  --work-guidelines FILE       Work guidelines/recipe file (default: \$RALPH_WORK_GUIDELINES)"; Write-Host "  --review-guidelines FILE     Review guidelines/recipe file (default: \$RALPH_REVIEW_GUIDELINES)"; Write-Host "  --session-id ID              Session ID (default: auto-generated)"; Write-Host "  --max-retries N              Max retry attempts for rate limits (default: \$RALPH_MAX_RETRIES)"; Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: \$RALPH_INITIAL_BACKOFF)"; Write-Host "  --throttle-delay N           Delay between requests in seconds (default: \$RALPH_THROTTLE_DELAY)"; Write-Host "  --enable-adaptive            Enable adaptive profile switching based on rate limits, quota errors, resource exhaustion, and iteration progress"; exit 1 }
 
     # Update script-level retry config from CLI options
     $script:MaxRetries = $maxRetries
@@ -675,6 +768,30 @@ function Run-Cli {
 
     for ($i = 1; $i -le $maxIter; $i++) {
         $iteration = $i
+        
+        # Adaptive profile switching logic
+        if ($enableAdaptive) {
+            $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
+            if ($newProfile -and $newProfile -ne $currentProfile) {
+                Write-Host "[ADAPTIVE] Switching profile from '$currentProfile' to '$newProfile'" -ForegroundColor Cyan
+                $currentProfile = $newProfile
+                Apply-Profile -SessionId $sessionId -ProfileName $newProfile
+                # Reload config with new profile
+                $config = Get-Config -SessionId $sessionId | JsonToDict
+                $workerModel = Coalesce $config['workerModel'] $workerModel
+                $workerProvider = Coalesce $config['workerProvider'] $workerProvider
+                $workerAgent = Coalesce $config['workerAgent'] $workerAgent
+                $reviewerModel = Coalesce $config['reviewerModel'] $reviewerModel
+                $reviewerProvider = Coalesce $config['reviewerProvider'] $reviewerProvider
+                $reviewerAgent = Coalesce $config['reviewerAgent'] $reviewerAgent
+                $monitorModel = Coalesce $config['monitorModel'] $monitorModel
+                $monitorProvider = Coalesce $config['monitorProvider'] $monitorProvider
+                $monitorAgent = Coalesce $config['monitorAgent'] $monitorAgent
+                $maxIterations = Coalesce $config['maxIterations'] $maxIterations
+                $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
+            }
+        }
+        
         Write-Host "======================================================================"
         Write-Host "  Iteration $iteration / $maxIterations"
         Write-Host "======================================================================"
