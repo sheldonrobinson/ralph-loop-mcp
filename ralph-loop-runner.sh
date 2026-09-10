@@ -233,6 +233,134 @@ validate_cross_model() {
 }
 
 # =============================================================================
+# ADAPTIVE PROFILE SWITCHING
+# =============================================================================
+# Apply a named/pathed profile to a session's config.json
+apply_profile() {
+    local session_id="${1}"
+    local profile_name="${2}"
+
+    local profile_path
+    if [[ -f "profiles/${profile_name}.json" ]]; then
+        profile_path="profiles/${profile_name}.json"
+    elif [[ -f "${profile_name}" ]]; then
+        profile_path="${profile_name}"
+    else
+        echo "[ERROR] Profile file not found: profiles/${profile_name}.json" >&2
+        return 1
+    fi
+
+    ensure_state_dir "${session_id}"
+
+    local worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent
+    local monitor_model monitor_provider monitor_agent max_iterations work_guidelines review_guidelines
+    worker_model=$(jq -r '.workerModel // empty' "${profile_path}")
+    worker_provider=$(jq -r '.workerProvider // empty' "${profile_path}")
+    worker_agent=$(jq -r '.workerAgent // "goose"' "${profile_path}")
+    reviewer_model=$(jq -r '.reviewerModel // empty' "${profile_path}")
+    reviewer_provider=$(jq -r '.reviewerProvider // empty' "${profile_path}")
+    reviewer_agent=$(jq -r '.reviewerAgent // "goose"' "${profile_path}")
+    monitor_model=$(jq -r '.monitorModel // empty' "${profile_path}")
+    monitor_provider=$(jq -r '.monitorProvider // empty' "${profile_path}")
+    monitor_agent=$(jq -r '.monitorAgent // "goose"' "${profile_path}")
+    max_iterations=$(jq -r '.maxIterations // 10' "${profile_path}")
+    work_guidelines=$(jq -r '.workGuidelines // empty' "${profile_path}")
+    review_guidelines=$(jq -r '.reviewGuidelines // empty' "${profile_path}")
+
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
+
+    echo "[ADAPTIVE] Applied profile: ${profile_name}" >&2
+    return 0
+}
+
+# Decide whether an adaptive profile switch is needed.
+# Inputs (all positional):
+#   $1 = session id, $2 = current iteration, $3 = worker output, $4 = reviewer output,
+#   $5 = feedback, $6 = current profile name
+# Outputs (on stdout) the profile name to switch to, or empty string if no switch.
+test_adaptive_profile_switch() {
+    local session_id="${1}"
+    local current_iteration="${2}"
+    local worker_output="${3}"
+    local reviewer_output="${4}"
+    local feedback="${5}"
+    local current_profile="${6}"
+
+    local config
+    config=$(get_config "${session_id}")
+    local current_max_iter=10
+    if [[ -n "${config}" ]]; then
+        current_max_iter=$(echo "${config}" | jq -r '.maxIterations // 10')
+    fi
+
+    # Rate limit / quota errors in worker output
+    if [[ -n "${worker_output}" ]] && is_rate_limit_error "${worker_output}"; then
+        if [[ "${current_profile}" != "ultra" ]]; then
+            echo "ultra"
+            return
+        fi
+    fi
+
+    # Rate limit / quota errors in reviewer output
+    if [[ -n "${reviewer_output}" ]] && is_rate_limit_error "${reviewer_output}"; then
+        if [[ "${current_profile}" != "ultra" ]]; then
+            echo "ultra"
+            return
+        fi
+    fi
+
+    # Resource exhaustion indicators in feedback
+    if [[ -n "${feedback}" ]] && echo "${feedback}" | grep -iqE "(resource|memory|cpu|quota|limit)"; then
+        if [[ "${current_profile}" != "ultra" ]]; then
+            echo "ultra"
+            return
+        fi
+    fi
+
+    # Iteration progress: past 50% -> super, past 75% -> ultra
+    local half_iter=$(( current_max_iter / 2 ))
+    local three_quarter_iter=$(( current_max_iter * 3 / 4 ))
+    if [[ "${current_iteration}" -gt "${half_iter}" && "${current_profile}" != "ultra" && "${current_profile}" != "super" ]]; then
+        echo "super"
+        return
+    fi
+    if [[ "${current_iteration}" -gt "${three_quarter_iter}" && "${current_profile}" != "ultra" ]]; then
+        echo "ultra"
+        return
+    fi
+
+    echo ""
+}
+
+# Switch profile and echo back the new config values as pipe-delimited:
+# worker_model|worker_provider|worker_agent|reviewer_model|reviewer_provider|reviewer_agent|monitor_model|monitor_provider|monitor_agent|max_iterations
+switch_adaptive_profile() {
+    local session_id="${1}"
+    local new_profile="${2}"
+    local old_profile="${3:-}"
+
+    echo "[ADAPTIVE] Switching profile from '${old_profile}' to '${new_profile}'" >&2
+    apply_profile "${session_id}" "${new_profile}"
+
+    local config
+    config=$(get_config "${session_id}")
+
+    local worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent
+    local monitor_model monitor_provider monitor_agent max_iterations
+    worker_model=$(echo "${config}" | jq -r '.workerModel // empty')
+    worker_provider=$(echo "${config}" | jq -r '.workerProvider // empty')
+    worker_agent=$(echo "${config}" | jq -r '.workerAgent // "goose"')
+    reviewer_model=$(echo "${config}" | jq -r '.reviewerModel // empty')
+    reviewer_provider=$(echo "${config}" | jq -r '.reviewerProvider // empty')
+    reviewer_agent=$(echo "${config}" | jq -r '.reviewerAgent // "goose"')
+    monitor_model=$(echo "${config}" | jq -r '.monitorModel // empty')
+    monitor_provider=$(echo "${config}" | jq -r '.monitorProvider // empty')
+    monitor_agent=$(echo "${config}" | jq -r '.monitorAgent // "goose"')
+    max_iterations=$(echo "${config}" | jq -r '.maxIterations // 10')
+
+    echo "${worker_model}|${worker_provider}|${worker_agent}|${reviewer_model}|${reviewer_provider}|${reviewer_agent}|${monitor_model}|${monitor_provider}|${monitor_agent}|${max_iterations}"
+}
+# =============================================================================
 # TASK MANAGEMENT
 # =============================================================================
 set_task() {
@@ -1420,11 +1548,13 @@ handle_block() {
 handle_run() {
     local id="${1}"
     local params="${2}"
-    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent
+    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent enable_adaptive current_profile
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
     max_iterations=$(echo "${params}" | jq -r '.maxIterations // 10')
+    enable_adaptive=$(echo "${params}" | jq -r '.enableAdaptive // false')
+    current_profile=$(echo "${params}" | jq -r '.profile // empty')
     worker_model=$(echo "${params}" | jq -r '.workerModel // empty')
     worker_provider=$(echo "${params}" | jq -r '.workerProvider // empty')
     worker_agent=$(echo "${params}" | jq -r '.workerAgent // "goose"')
@@ -1464,9 +1594,22 @@ handle_run() {
         worker_output=$(call_llm_worker "${task}" "${feedback}" "${i}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
         
         if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
-            block_iteration "${session_id}" "WORK PHASE FAILED - Rate limit or quota error from worker LLM"
-            echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - Rate limit, quota error, or no output from worker"}')
-            return
+            if [[ "${enable_adaptive}" == "true" ]]; then
+                local new_profile
+                new_profile=$(test_adaptive_profile_switch "${session_id}" "${i}" "${worker_output}" "${reviewer_output}" "${feedback}" "${current_profile}")
+                if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
+                    local sw_values
+                    sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
+                    current_profile="${new_profile}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    worker_output=$(call_llm_worker "${task}" "${feedback}" "${i}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
+                fi
+            fi
+            if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
+                block_iteration "${session_id}" "WORK PHASE FAILED - Rate limit or quota error from worker LLM"
+                echo $(json_response "${id}" "" '{"code":-32603,"message":"WORK PHASE FAILED - Rate limit, quota error, or no output from worker"}')
+                return
+            fi
         fi
         
         local work_out_file="$(get_state_file "${session_id}" "work.out")"
@@ -1488,9 +1631,22 @@ handle_run() {
         reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${i}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
         
         if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
-            block_iteration "${session_id}" "REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM"
-            echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer"}')
-            return
+            if [[ "${enable_adaptive}" == "true" ]]; then
+                local new_profile
+                new_profile=$(test_adaptive_profile_switch "${session_id}" "${i}" "${worker_output}" "${reviewer_output}" "${feedback}" "${current_profile}")
+                if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
+                    local sw_values
+                    sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
+                    current_profile="${new_profile}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${i}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
+                fi
+            fi
+            if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
+                block_iteration "${session_id}" "REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM"
+                echo $(json_response "${id}" "" '{"code":-32603,"message":"REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer"}')
+                return
+            fi
         fi
         
         local review_out_file="$(get_state_file "${session_id}" "review.out")"
@@ -1513,6 +1669,17 @@ handle_run() {
             result=$(jq -n --arg msg "SHIPPED after ${i} iteration(s)" --argjson status "${status}" '{success: true, message: $msg, status: $status, shipped: true, iterations: $i}')
             echo $(json_response "${id}" "${result}")
             return
+        fi
+
+        if [[ "${enable_adaptive}" == "true" ]]; then
+            local new_profile
+            new_profile=$(test_adaptive_profile_switch "${session_id}" "${i}" "${worker_output}" "${reviewer_output}" "${feedback}" "${current_profile}")
+            if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
+                local sw_values
+                sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
+                current_profile="${new_profile}"
+                IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+            fi
         fi
     done
     

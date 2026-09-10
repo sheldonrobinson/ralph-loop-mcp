@@ -73,13 +73,14 @@ if ($env:RALPH_PROFILE -and (Test-Path $env:RALPH_PROFILE)) {
         Write-Error "Failed to load profile from '$env:RALPH_PROFILE': $_" 
     }
     # Extract profile name from path for adaptive tracking
-    $currentProfile = Split-Path $env:RALPH_PROFILE -Leaf
-    $currentProfile = $currentProfile -replace '\.json$', ''
+    $script:CurrentProfile = Split-Path $env:RALPH_PROFILE -Leaf
+    $script:CurrentProfile = $script:CurrentProfile -replace '\.json$', ''
 }
 
 # CLI argument placeholders
 $script:CLITask = ''
 $script:CLISessionId = ''
+$script:CurrentProfile = Coalesce $script:CurrentProfile ''
 
 # =============================================================================
 # UTILITY FUNCTIONS (shared by both modes)
@@ -588,6 +589,7 @@ function Run-Cli {
         Write-Host "  --max-retries N              Max retry attempts for rate limits (default: `$env:RALPH_MAX_RETRIES)"
         Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: `$env:RALPH_INITIAL_BACKOFF)"
         Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"
+        Write-Host "  --enable-adaptive            Enable adaptive profile switching (rate limits/quota/iteration progress)"
         Write-Host "  -h, --help                   Show this help message"
         exit 0
     }
@@ -608,7 +610,7 @@ function Run-Cli {
     $initialBackoff = $script:InitialBackoff
     $throttleDelay = $script:ThrottleDelay
     $enableAdaptive = $false
-    $currentProfile = ''
+    $currentProfile = Coalesce $script:CurrentProfile ''
 
     # Helper function to test if adaptive profile switch is needed
     function Test-AdaptiveProfileSwitch {
@@ -622,8 +624,12 @@ function Run-Cli {
         )
         
         # Get current profile's max iterations
-        $config = Get-Config -SessionId $SessionId | JsonToDict
-        $currentMaxIter = Coalesce $config['maxIterations'] 10
+        $configRaw = Get-Config -SessionId $SessionId
+        $currentMaxIter = 10
+        if ($configRaw) {
+            $config = JsonToDict $configRaw
+            $currentMaxIter = [int](Coalesce $config['maxIterations'] 10)
+        }
         
         # Check for rate limit / quota errors in worker output
         if ($WorkerOutput -and ($WorkerOutput -match '(?i)(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled)')) {
@@ -697,6 +703,30 @@ function Run-Cli {
         Write-Host "[ADAPTIVE] Applied profile: $ProfileName" -ForegroundColor Green
     }
 
+    # Helper function to switch profile and return new config values
+    function Switch-AdaptiveProfile {
+        param(
+            [string]$SessionId,
+            [string]$NewProfile,
+            [string]$OldProfile = ''
+        )
+        Write-Host "[ADAPTIVE] Switching profile from '$OldProfile' to '$NewProfile'" -ForegroundColor Cyan
+        Apply-Profile -SessionId $SessionId -ProfileName $NewProfile
+        $config = Get-Config -SessionId $SessionId | JsonToDict
+        return @{
+            workerModel = Coalesce $config['workerModel'] ''
+            workerProvider = Coalesce $config['workerProvider'] ''
+            workerAgent = Coalesce $config['workerAgent'] 'goose'
+            reviewerModel = Coalesce $config['reviewerModel'] ''
+            reviewerProvider = Coalesce $config['reviewerProvider'] ''
+            reviewerAgent = Coalesce $config['reviewerAgent'] 'goose'
+            monitorModel = Coalesce $config['monitorModel'] ''
+            monitorProvider = Coalesce $config['monitorProvider'] ''
+            monitorAgent = Coalesce $config['monitorAgent'] 'goose'
+            maxIterations = Coalesce $config['maxIterations'] 10
+        }
+    }
+
     # Parse command line arguments.
     # Flags are consumed by name; the last positional (non-flag) argument is the task.
     $cliArgs = $script:ScriptArgs
@@ -763,34 +793,13 @@ function Run-Cli {
 
     $feedback = ''
     $iteration = 1
+    $workerOutput = ''
+    $reviewerOutput = ''
 
     $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
 
     for ($i = 1; $i -le $maxIter; $i++) {
         $iteration = $i
-        
-        # Adaptive profile switching logic
-        if ($enableAdaptive) {
-            $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
-            if ($newProfile -and $newProfile -ne $currentProfile) {
-                Write-Host "[ADAPTIVE] Switching profile from '$currentProfile' to '$newProfile'" -ForegroundColor Cyan
-                $currentProfile = $newProfile
-                Apply-Profile -SessionId $sessionId -ProfileName $newProfile
-                # Reload config with new profile
-                $config = Get-Config -SessionId $sessionId | JsonToDict
-                $workerModel = Coalesce $config['workerModel'] $workerModel
-                $workerProvider = Coalesce $config['workerProvider'] $workerProvider
-                $workerAgent = Coalesce $config['workerAgent'] $workerAgent
-                $reviewerModel = Coalesce $config['reviewerModel'] $reviewerModel
-                $reviewerProvider = Coalesce $config['reviewerProvider'] $reviewerProvider
-                $reviewerAgent = Coalesce $config['reviewerAgent'] $reviewerAgent
-                $monitorModel = Coalesce $config['monitorModel'] $monitorModel
-                $monitorProvider = Coalesce $config['monitorProvider'] $monitorProvider
-                $monitorAgent = Coalesce $config['monitorAgent'] $monitorAgent
-                $maxIterations = Coalesce $config['maxIterations'] $maxIterations
-                $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
-            }
-        }
         
         Write-Host "======================================================================"
         Write-Host "  Iteration $iteration / $maxIterations"
@@ -801,10 +810,26 @@ function Run-Cli {
 
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
         
-        if ($workerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $workerOutput)) {
-            Write-Host "[ERROR] WORK PHASE FAILED - Rate limit, quota error, or no output from worker" -ForegroundColor Red
-            Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
-            exit 1
+        if ($workerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $workerOutput)) {
+            if ($enableAdaptive) {
+                $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
+                if ($newProfile -and $newProfile -ne $currentProfile) {
+                    $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
+                    $currentProfile = $newProfile
+                    $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
+                    $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
+                    $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                    $maxIterations = $sw.maxIterations
+                    $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
+                    Write-Host "[ADAPTIVE] Retrying work phase with upgraded profile '$currentProfile'" -ForegroundColor Cyan
+                    $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
+                }
+            }
+            if ($workerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $workerOutput)) {
+                Write-Host "[ERROR] WORK PHASE FAILED - Rate limit, quota error, or no output from worker" -ForegroundColor Red
+                Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
+                exit 1
+            }
         }
 
         # Save worker output to file for Monitor LLM fallback
@@ -824,10 +849,26 @@ function Run-Cli {
 
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
         
-        if ($reviewerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $reviewerOutput)) {
-            Write-Host "[ERROR] REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" -ForegroundColor Red
-            Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
-            exit 1
+        if ($reviewerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $reviewerOutput)) {
+            if ($enableAdaptive) {
+                $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
+                if ($newProfile -and $newProfile -ne $currentProfile) {
+                    $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
+                    $currentProfile = $newProfile
+                    $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
+                    $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
+                    $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                    $maxIterations = $sw.maxIterations
+                    $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
+                    Write-Host "[ADAPTIVE] Retrying review phase with upgraded profile '$currentProfile'" -ForegroundColor Cyan
+                    $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
+                }
+            }
+            if ($reviewerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $reviewerOutput)) {
+                Write-Host "[ERROR] REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" -ForegroundColor Red
+                Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
+                exit 1
+            }
         }
 
         # Save reviewer output to file for Monitor LLM fallback
@@ -853,6 +894,20 @@ function Run-Cli {
             Write-Host ">> REVISE - Feedback for next iteration:" -ForegroundColor Yellow
             Write-Host $feedback
             Write-Host ""
+
+            # Adaptive profile switching based on iteration progress (no rate limit hit this round)
+            if ($enableAdaptive) {
+                $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
+                if ($newProfile -and $newProfile -ne $currentProfile) {
+                    $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
+                    $currentProfile = $newProfile
+                    $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
+                    $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
+                    $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                    $maxIterations = $sw.maxIterations
+                    $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
+                }
+            }
         }
     }
 
@@ -1090,7 +1145,7 @@ function Handle-Run {
 
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting ($i -gt 1)
         
-        if ($workerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $workerOutput)) {
+        if ($workerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $workerOutput)) {
             Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
             return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Rate limit, quota error, or no output from worker' }
         }
@@ -1109,7 +1164,7 @@ function Handle-Run {
 
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting ($i -gt 1)
         
-        if ($reviewerOutput -startswith 'RATE_LIMIT_EXCEEDED' -or (-not $reviewerOutput)) {
+        if ($reviewerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $reviewerOutput)) {
             Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
             return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer' }
         }
@@ -1346,6 +1401,9 @@ if ($args.Count -gt 0) {
         }
     } catch { Write-Error $_ }
 }
+
+
+
 
 
 
