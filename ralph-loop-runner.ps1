@@ -578,17 +578,6 @@ $script:AdaptiveOrders = @{
     'balanced' = @{ resource = @('pro','plus','lite'); quality = @('pro','super','ultra'); start = 'pro' }
 }
 
-# Direct transition table for the 'balanced' strategy: (current profile, trigger) -> next profile.
-# A 'quality' error switches to the quality ladder; a 'resource' error switches to the resource ladder.
-# The mode ("optimizing for") is implied by the trigger type, so no separate state is tracked.
-$script:AdaptiveBalancedTransitions = @{
-    'pro'   = @{ quality = 'super'; resource = 'plus'  }
-    'super' = @{ quality = 'ultra'; resource = 'lite'  }
-    'ultra' = @{ quality = 'pro';   resource = 'pro'   }
-    'plus'  = @{ quality = 'ultra'; resource = 'lite'  }
-    'lite'  = @{ quality = 'pro';   resource = 'pro'   }
-}
-
 # Detect a resource/rate-limit trigger in the combined output/feedback.
 function Test-ResourceTrigger {
     param([string]$WorkerOutput, [string]$ReviewerOutput, [string]$Feedback)
@@ -626,21 +615,11 @@ function Get-AdaptiveProfileSwitch {
         [string]$CurrentProfile
     )
 
-    if ($Strategy -eq 'balanced') {
-        $table = $script:AdaptiveBalancedTransitions
-        if ($table.ContainsKey($CurrentProfile)) {
-            $row = $table[$CurrentProfile]
-            if ($row.ContainsKey($Trigger)) { return $row[$Trigger] }
-            return 'pro'
-        }
-        return 'pro'
-    }
-
     $order = $script:AdaptiveOrders[$Strategy][$Trigger]
     if (-not $order) { return $null }
 
     # If current profile is not in the order, default into the start position.
-    if (-not $CurrentProfile -or $order -notcontains $CurrentProfile) {
+    if (-not $CurrentProfile) {
         # Start from the first entry in the order (next profile after the strategy's start).
         return $order[0]
     }
@@ -1509,36 +1488,3 @@ if ($args.Count -gt 0) {
         }
     } catch { Write-Error $_ }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
