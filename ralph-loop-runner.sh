@@ -335,24 +335,32 @@ get_adaptive_profile_switch() {
         *)                   echo ""; return ;;
     esac
 
+    # Guard against an empty order (should not happen once the case above matches).
+    if [[ ${#order[@]} -eq 0 ]]; then
+        echo ""
+        return
+    fi
+
+    # Locate the current profile's position in the order (0-based index).
     local idx=-1
     local i
-    for i in "${!order[@]}"; do
+    for ((i = 0; i < ${#order[@]}; i++)); do
         if [[ "${order[$i]}" == "${current_profile}" ]]; then
             idx=${i}
             break
         fi
     done
 
-    if [[ -z "${current_profile}" ]]; then
-        # Not yet positioned in this order: start from the first entry.
+    # If the current profile is empty or not present in this order, default to the
+    # start position (the first entry in the order) rather than relying on any
+    # modulo arithmetic coincidence for an unmatched index.
+    if [[ -z "${current_profile}" || ${idx} -eq -1 ]]; then
         echo "${order[0]}"
         return
     fi
 
-    # Cycle back to the start of the order when reaching the end
-    local next_idx=$(( (idx + 1) % ${#order[@]} ))
-    echo "${order[$next_idx]}"
+    # Step forward, cycling back to the start of the order when reaching the end.
+    echo "${order[$(( (idx + 1) % ${#order[@]} ))]}"
 }
 
 # Switch profile and echo back the new config values as pipe-delimited:
