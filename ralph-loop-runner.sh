@@ -273,63 +273,90 @@ apply_profile() {
     return 0
 }
 
-# Decide whether an adaptive profile switch is needed.
-# Inputs (all positional):
-#   $1 = session id, $2 = current iteration, $3 = worker output, $4 = reviewer output,
-#   $5 = feedback, $6 = current profile name
-# Outputs (on stdout) the profile name to switch to, or empty string if no switch.
-test_adaptive_profile_switch() {
-    local session_id="${1}"
-    local current_iteration="${2}"
-    local worker_output="${3}"
-    local reviewer_output="${4}"
-    local feedback="${5}"
-    local current_profile="${6}"
+# Detect a resource / rate-limit / quota trigger in the combined output/feedback.
+# Inputs: $1 = worker output, $2 = reviewer output, $3 = feedback
+# Returns 0 (true) if a resource trigger is detected, 1 otherwise.
+test_resource_trigger() {
+    local worker_output="${1}"
+    local reviewer_output="${2}"
+    local feedback="${3}"
 
-    local config
-    config=$(get_config "${session_id}")
-    local current_max_iter=10
-    if [[ -n "${config}" ]]; then
-        current_max_iter=$(echo "${config}" | jq -r '.maxIterations // 10')
-    fi
-
-    # Rate limit / quota errors in worker output
     if [[ -n "${worker_output}" ]] && is_rate_limit_error "${worker_output}"; then
-        if [[ "${current_profile}" != "ultra" ]]; then
-            echo "ultra"
-            return
-        fi
+        return 0
     fi
-
-    # Rate limit / quota errors in reviewer output
     if [[ -n "${reviewer_output}" ]] && is_rate_limit_error "${reviewer_output}"; then
-        if [[ "${current_profile}" != "ultra" ]]; then
-            echo "ultra"
-            return
-        fi
+        return 0
     fi
-
-    # Resource exhaustion indicators in feedback
-    if [[ -n "${feedback}" ]] && echo "${feedback}" | grep -iqE "(resource|memory|cpu|quota|limit)"; then
-        if [[ "${current_profile}" != "ultra" ]]; then
-            echo "ultra"
-            return
-        fi
+    if [[ -n "${feedback}" ]] && echo "${feedback}" | grep -iqE "(resource|memory|cpu|quota|limit|out of memory)"; then
+        return 0
     fi
+    return 1
+}
 
-    # Iteration progress: past 50% -> super, past 75% -> ultra
-    local half_iter=$(( current_max_iter / 2 ))
-    local three_quarter_iter=$(( current_max_iter * 3 / 4 ))
-    if [[ "${current_iteration}" -gt "${half_iter}" && "${current_profile}" != "ultra" && "${current_profile}" != "super" ]]; then
-        echo "super"
+# Detect a low-quality / token-repetition trigger in the combined output/feedback.
+# Inputs: $1 = worker output, $2 = reviewer output, $3 = feedback
+# Returns 0 (true) if a quality trigger is detected, 1 otherwise.
+test_quality_trigger() {
+    local worker_output="${1}"
+    local reviewer_output="${2}"
+    local feedback="${3}"
+    local text
+
+    for text in "${worker_output}" "${reviewer_output}" "${feedback}"; do
+        [[ -z "${text}" ]] && continue
+        # Explicit low-quality markers
+        if echo "${text}" | grep -iqE "(low quality|poor quality|nonsensical|incoherent|garbled|repetitive|repeating itself|lorem ipsum|placeholder)"; then
+            return 0
+        fi
+        # Token repetition: a word of length >= 8 repeated 6+ times
+        if echo "${text}" | grep -oE '\b\w{8,}\b' | tr '[:upper:]' '[:lower:]' | sort | uniq -c | awk '$1 >= 6 {found=1} END {exit !found}'; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Decide the next profile for a given strategy + trigger + current profile.
+# Inputs: $1 = strategy (quality|price|balanced), $2 = trigger (resource|quality), $3 = current profile
+# Outputs (on stdout) the next profile name, or empty string if no further switch.
+get_adaptive_profile_switch() {
+    local strategy="${1}"
+    local trigger="${2}"
+    local current_profile="${3}"
+    local order=()
+
+    case "${strategy}:${trigger}" in
+        quality:resource)    order=(ultra super pro plus lite) ;;
+        quality:quality)     order=(lite plus pro super ultra) ;;
+        price:resource)      order=(ultra super pro plus lite) ;;
+        price:quality)       order=(lite plus pro super ultra) ;;
+        balanced:resource)   order=(pro lite plus) ;;
+        balanced:quality)    order=(pro ultra super) ;;
+        *)                   echo ""; return ;;
+    esac
+
+    local idx=-1
+    local i
+    for i in "${!order[@]}"; do
+        if [[ "${order[$i]}" == "${current_profile}" ]]; then
+            idx=${i}
+            break
+        fi
+    done
+
+    if [[ -z "${current_profile}" || ${idx} -eq -1 ]]; then
+        # Not yet positioned in this order: start from the first entry.
+        echo "${order[0]}"
         return
     fi
-    if [[ "${current_iteration}" -gt "${three_quarter_iter}" && "${current_profile}" != "ultra" ]]; then
-        echo "ultra"
+
+    if [[ ${idx} -ge $(( ${#order[@]} - 1 )) ]]; then
+        # Already at the end of the order.
+        echo ""
         return
     fi
 
-    echo ""
+    echo "${order[$(( idx + 1 ))]}"
 }
 
 # Switch profile and echo back the new config values as pipe-delimited:
@@ -966,6 +993,9 @@ ${output}"
 
 # CLI orchestration main function
 run_cli() {
+    local enable_adaptive="false"
+    local adaptive_strategy="balanced"
+    local current_profile=""
     local worker_model="${WORKER_MODEL}"
     local worker_provider="${WORKER_PROVIDER}"
     local worker_agent="${WORKER_AGENT}"
@@ -1006,6 +1036,8 @@ run_cli() {
                 echo "  --max-retries N              Max retry attempts for rate limits (default: \$RALPH_MAX_RETRIES)"
                 echo "  --initial-backoff N          Initial backoff seconds for retries (default: \$RALPH_INITIAL_BACKOFF)"
                 echo "  --throttle-delay N           Delay between requests in seconds (default: \$RALPH_THROTTLE_DELAY)"
+                echo "  --enable-adaptive            Enable adaptive profile switching"
+                echo "  --adaptive-strategy STRATEGY Adaptive strategy: quality, price, or balanced (default: balanced)"
                 exit 0
                 ;;
             --worker-model)
@@ -1068,6 +1100,14 @@ run_cli() {
                 throttle_delay="${2}"
                 shift 2
                 ;;
+            --enable-adaptive)
+                enable_adaptive="true"
+                shift
+                ;;
+            --adaptive-strategy)
+                adaptive_strategy="${2}"
+                shift 2
+                ;;
             --session-id)
                 CLI_SESSION_ID="${2}"
                 shift 2
@@ -1118,6 +1158,8 @@ run_cli() {
         echo "  --max-retries N              Max retry attempts for rate limits (default: \$RALPH_MAX_RETRIES)"
         echo "  --initial-backoff N          Initial backoff seconds for retries (default: \$RALPH_INITIAL_BACKOFF)"
         echo "  --throttle-delay N           Delay between requests in seconds (default: \$RALPH_THROTTLE_DELAY)"
+        echo "  --enable-adaptive            Enable adaptive profile switching"
+        echo "  --adaptive-strategy STRATEGY Adaptive strategy: quality, price, or balanced (default: balanced)"
         exit 1
     fi
     
@@ -1178,7 +1220,25 @@ run_cli() {
     # Initialize session
     set_task "${session_id}" "${task}"
     set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
-    
+
+    # Validate adaptive strategy and resolve start profile
+    if [[ "${enable_adaptive}" == "true" ]]; then
+        case "${adaptive_strategy}" in
+            quality|price|balanced) ;;
+            *) echo "[WARNING] Unknown adaptive strategy '${adaptive_strategy}'; falling back to 'balanced'." >&2; adaptive_strategy="balanced" ;;
+        esac
+        if [[ -z "${current_profile}" ]]; then
+            case "${adaptive_strategy}" in
+                quality) current_profile="ultra" ;;
+                price)   current_profile="lite" ;;
+                *)       current_profile="pro" ;;
+            esac
+            echo "[ADAPTIVE] Strategy '${adaptive_strategy}' (start profile '${current_profile}')" >&2
+        else
+            echo "[ADAPTIVE] Strategy '${adaptive_strategy}' (starting from '${current_profile}')" >&2
+        fi
+    fi
+
     local feedback=""
     local iteration=1
     
@@ -1209,9 +1269,23 @@ run_cli() {
         worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
         
         if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
-            echo "[WARN] WORK PHASE FAILED - Rate limit, quota error, or no output from worker" >&2
-            block_iteration "${session_id}" "WORK PHASE FAILED - Rate limit or quota error from worker LLM"
-            exit 1
+            if [[ "${enable_adaptive}" == "true" ]]; then
+                local new_profile
+                new_profile=$(get_adaptive_profile_switch "${adaptive_strategy}" "resource" "${current_profile}")
+                if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
+                    local sw_values
+                    sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
+                    current_profile="${new_profile}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    echo "[ADAPTIVE] Retrying work phase with upgraded profile '${current_profile}'" >&2
+                    worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
+                fi
+            fi
+            if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
+                echo "[WARN] WORK PHASE FAILED - Rate limit, quota error, or no output from worker" >&2
+                block_iteration "${session_id}" "WORK PHASE FAILED - Rate limit or quota error from worker LLM"
+                exit 1
+            fi
         fi
         
         local work_out_file="$(get_state_file "${session_id}" "work.out")"
@@ -1239,9 +1313,23 @@ run_cli() {
         reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
         
         if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
-            echo "[WARN] REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" >&2
-            block_iteration "${session_id}" "REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM"
-            exit 1
+            if [[ "${enable_adaptive}" == "true" ]]; then
+                local new_profile
+                new_profile=$(get_adaptive_profile_switch "${adaptive_strategy}" "resource" "${current_profile}")
+                if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
+                    local sw_values
+                    sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
+                    current_profile="${new_profile}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    echo "[ADAPTIVE] Retrying review phase with upgraded profile '${current_profile}'" >&2
+                    reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
+                fi
+            fi
+            if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
+                echo "[WARN] REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer" >&2
+                block_iteration "${session_id}" "REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM"
+                exit 1
+            fi
         fi
         
         local review_out_file="$(get_state_file "${session_id}" "review.out")"
@@ -1271,6 +1359,26 @@ run_cli() {
             echo "[EMOJI] REVISE - Feedback for next iteration:"
             echo "${feedback}"
             echo ""
+
+            # Adaptive profile switching based on output quality or resource constraints
+            if [[ "${enable_adaptive}" == "true" ]]; then
+                local new_profile=""
+                local trigger=""
+                if test_quality_trigger "${worker_output}" "${reviewer_output}" "${feedback}"; then
+                    trigger="quality"
+                elif test_resource_trigger "${worker_output}" "${reviewer_output}" "${feedback}"; then
+                    trigger="resource"
+                fi
+                if [[ -n "${trigger}" ]]; then
+                    new_profile=$(get_adaptive_profile_switch "${adaptive_strategy}" "${trigger}" "${current_profile}")
+                fi
+                if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
+                    local sw_values
+                    sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
+                    current_profile="${new_profile}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                fi
+            fi
         fi
     done
     
@@ -1548,12 +1656,13 @@ handle_block() {
 handle_run() {
     local id="${1}"
     local params="${2}"
-    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent enable_adaptive current_profile
+    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent enable_adaptive adaptive_strategy current_profile
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
     max_iterations=$(echo "${params}" | jq -r '.maxIterations // 10')
     enable_adaptive=$(echo "${params}" | jq -r '.enableAdaptive // false')
+    adaptive_strategy=$(echo "${params}" | jq -r '.adaptiveStrategy // "balanced"')
     current_profile=$(echo "${params}" | jq -r '.profile // empty')
     worker_model=$(echo "${params}" | jq -r '.workerModel // empty')
     worker_provider=$(echo "${params}" | jq -r '.workerProvider // empty')
@@ -1580,7 +1689,25 @@ handle_run() {
     
     set_task "${session_id}" "${task}"
     set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
-    
+
+    # Validate adaptive strategy and resolve start profile
+    if [[ "${enable_adaptive}" == "true" ]]; then
+        case "${adaptive_strategy}" in
+            quality|price|balanced) ;;
+            *) echo "[WARNING] Unknown adaptive strategy '${adaptive_strategy}'; falling back to 'balanced'." >&2; adaptive_strategy="balanced" ;;
+        esac
+        if [[ -z "${current_profile}" ]]; then
+            case "${adaptive_strategy}" in
+                quality) current_profile="ultra" ;;
+                price)   current_profile="lite" ;;
+                *)       current_profile="pro" ;;
+            esac
+            echo "[ADAPTIVE] Strategy '${adaptive_strategy}' (start profile '${current_profile}')" >&2
+        else
+            echo "[ADAPTIVE] Strategy '${adaptive_strategy}' (starting from '${current_profile}')" >&2
+        fi
+    fi
+
     local feedback=""
     local result
     
@@ -1596,7 +1723,7 @@ handle_run() {
         if [[ "${worker_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${worker_output}" ]]; then
             if [[ "${enable_adaptive}" == "true" ]]; then
                 local new_profile
-                new_profile=$(test_adaptive_profile_switch "${session_id}" "${i}" "${worker_output}" "${reviewer_output}" "${feedback}" "${current_profile}")
+                new_profile=$(get_adaptive_profile_switch "${adaptive_strategy}" "resource" "${current_profile}")
                 if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
                     local sw_values
                     sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
@@ -1633,7 +1760,7 @@ handle_run() {
         if [[ "${reviewer_output}" == RATE_LIMIT_EXCEEDED* ]] || [[ -z "${reviewer_output}" ]]; then
             if [[ "${enable_adaptive}" == "true" ]]; then
                 local new_profile
-                new_profile=$(test_adaptive_profile_switch "${session_id}" "${i}" "${worker_output}" "${reviewer_output}" "${feedback}" "${current_profile}")
+                new_profile=$(get_adaptive_profile_switch "${adaptive_strategy}" "resource" "${current_profile}")
                 if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
                     local sw_values
                     sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
@@ -1672,8 +1799,16 @@ handle_run() {
         fi
 
         if [[ "${enable_adaptive}" == "true" ]]; then
-            local new_profile
-            new_profile=$(test_adaptive_profile_switch "${session_id}" "${i}" "${worker_output}" "${reviewer_output}" "${feedback}" "${current_profile}")
+            local new_profile=""
+            local trigger=""
+            if test_quality_trigger "${worker_output}" "${reviewer_output}" "${feedback}"; then
+                trigger="quality"
+            elif test_resource_trigger "${worker_output}" "${reviewer_output}" "${feedback}"; then
+                trigger="resource"
+            fi
+            if [[ -n "${trigger}" ]]; then
+                new_profile=$(get_adaptive_profile_switch "${adaptive_strategy}" "${trigger}" "${current_profile}")
+            fi
             if [[ -n "${new_profile}" && "${new_profile}" != "${current_profile}" ]]; then
                 local sw_values
                 sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
@@ -1837,7 +1972,9 @@ handle_list_tools() {
         "monitorAgent": { "type": "string", "description": "Monitor agent CLI (goose, claude, openai, gemini, copilot, default: '\''goose'\'')" },
         "crossModelReviewEnforced": { "type": "boolean", "description": "Enforce cross-model review validation (default: true)" },
         "workGuidelines": { "type": "string", "description": "Path to work recipe or guidelines file" },
-        "reviewGuidelines": { "type": "string", "description": "Path to review recipe or guidelines file" }
+        "reviewGuidelines": { "type": "string", "description": "Path to review recipe or guidelines file" },
+        "enableAdaptive": { "type": "boolean", "description": "Enable adaptive profile switching (default: false)" },
+        "adaptiveStrategy": { "type": "string", "enum": ["quality", "price", "balanced"], "description": "Adaptive switching strategy (default: balanced)" }
       },
       "required": ["task", "workerModel", "workerProvider", "reviewerModel", "reviewerProvider"]
     }

@@ -1,4 +1,4 @@
-﻿<#>
+<#>
 .SYNOPSIS
     ralph-loop-runner - PowerShell Implementation (Unified: MCP Server + CLI Orchestration)
     Cross-platform implementation of the Ralph Loop iterative development technique
@@ -567,6 +567,130 @@ function Parse-ReviewerOutput {
 }
 
 # CLI orchestration main function
+
+# Strategy profile orderings.
+# Each strategy maps a trigger class to an ordered list of profiles to walk through.
+#   trigger 'resource' = rate limit / quota / resource exhaustion  -> move toward cheaper/faster
+#   trigger 'quality' = token repetition / low quality output      -> move toward higher quality
+$script:AdaptiveOrders = @{
+    'quality'  = @{ resource = @('ultra','super','pro','plus','lite'); quality = @('lite','plus','pro','super','ultra'); start = 'ultra' }
+    'price'    = @{ resource = @('ultra','super','pro','plus','lite'); quality = @('lite','plus','pro','super','ultra'); start = 'lite' }
+    'balanced' = @{ resource = @('pro','lite','plus'); quality = @('pro','ultra','super'); start = 'pro' }
+}
+
+# Detect a resource/rate-limit trigger in the combined output/feedback.
+function Test-ResourceTrigger {
+    param([string]$WorkerOutput, [string]$ReviewerOutput, [string]$Feedback)
+    $regex = '(?i)(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled|out of memory|insufficient (quota|resources))'
+    return ($WorkerOutput -and $WorkerOutput -match $regex) -or
+           ($ReviewerOutput -and $ReviewerOutput -match $regex) -or
+           ($Feedback -and $Feedback -match '(?i)(resource|memory|cpu|quota|limit)')
+}
+
+# Detect a low-quality / token-repetition trigger in the combined output/feedback.
+function Test-QualityTrigger {
+    param([string]$WorkerOutput, [string]$ReviewerOutput, [string]$Feedback)
+    # Heuristics: repeated long tokens, repetition keywords, or explicit low-quality markers
+    foreach ($text in @($WorkerOutput, $ReviewerOutput, $Feedback)) {
+        if (-not $text) { continue }
+        # Explicit low-quality markers
+        if ($text -match '(?i)(low quality|poor quality|nonsensical|incoherent|garbled|repetitive|repeating itself|lorem ipsum|placeholder)') {
+            return $true
+        }
+        # Token repetition: a >= 8-char word repeated 5+ times
+        $words = [regex]::Matches($text, '\b\w{8,}\b') | ForEach-Object { $_.Value.ToLower() }
+        $counts = @{}
+        foreach ($w in $words) { $counts[$w] = [int]$counts[$w] + 1 }
+        foreach ($k in $counts.Keys) { if ($counts[$k] -ge 6) { return $true } }
+    }
+    return $false
+}
+
+# Decide the next profile for a given strategy + trigger + current profile.
+# Returns profile name to switch to, or $null if no further switch is possible.
+function Get-AdaptiveProfileSwitch {
+    param(
+        [string]$Strategy,
+        [string]$Trigger,
+        [string]$CurrentProfile
+    )
+
+    $order = $script:AdaptiveOrders[$Strategy][$Trigger]
+    if (-not $order) { return $null }
+
+    # If current profile is not in the order, default into the start position.
+    if (-not $CurrentProfile -or $order -notcontains $CurrentProfile) {
+        # Start from the first entry in the order (next profile after the strategy's start).
+        return $order[0]
+    }
+
+    $idx = [Array]::IndexOf($order, $CurrentProfile)
+    if ($idx -eq -1) { return $order[0] }
+    if ($idx -ge ($order.Count - 1)) { return $null }  # already at the end
+    return $order[$idx + 1]
+}
+
+# Helper function to apply a profile
+function Apply-Profile {
+    param(
+        [string]$SessionId,
+        [string]$ProfileName
+    )
+    
+    $profilePath = "profiles/$ProfileName.json"
+    if (-not (Test-Path $profilePath)) {
+        Write-Host "[ERROR] Profile file not found: $profilePath" -ForegroundColor Red
+        return
+    }
+    
+    $profile = Get-Content $profilePath -Raw | ConvertFrom-Json
+    
+    # Update config with profile settings
+    $config = @{
+        workerModel = $profile.workerModel
+        workerProvider = $profile.workerProvider
+        workerAgent = $profile.workerAgent
+        reviewerModel = $profile.reviewerModel
+        reviewerProvider = $profile.reviewerProvider
+        reviewerAgent = $profile.reviewerAgent
+        monitorModel = $profile.monitorModel
+        monitorProvider = $profile.monitorProvider
+        monitorAgent = $profile.monitorAgent
+        maxIterations = $profile.maxIterations
+        crossModelReviewEnforced = $true
+        workGuidelines = $profile.workGuidelines
+        reviewGuidelines = $profile.reviewGuidelines
+        configuredAt = (Get-Date).ToString('o')
+    }
+    $config | ConvertTo-Json -Depth 10 | Set-Content -Path (Get-StateFile -SessionId $SessionId -FileName 'config.json') -Encoding UTF8
+    
+    Write-Host "[ADAPTIVE] Applied profile: $ProfileName" -ForegroundColor Green
+}
+
+# Helper function to switch profile and return new config values
+function Switch-AdaptiveProfile {
+    param(
+        [string]$SessionId,
+        [string]$NewProfile,
+        [string]$OldProfile = ''
+    )
+    Write-Host "[ADAPTIVE] Switching profile from '$OldProfile' to '$NewProfile'" -ForegroundColor Cyan
+    Apply-Profile -SessionId $SessionId -ProfileName $NewProfile
+    $config = Get-Config -SessionId $SessionId | JsonToDict
+    return @{
+        workerModel = Coalesce $config['workerModel'] ''
+        workerProvider = Coalesce $config['workerProvider'] ''
+        workerAgent = Coalesce $config['workerAgent'] 'goose'
+        reviewerModel = Coalesce $config['reviewerModel'] ''
+        reviewerProvider = Coalesce $config['reviewerProvider'] ''
+        reviewerAgent = Coalesce $config['reviewerAgent'] 'goose'
+        monitorModel = Coalesce $config['monitorModel'] ''
+        monitorProvider = Coalesce $config['monitorProvider'] ''
+        monitorAgent = Coalesce $config['monitorAgent'] 'goose'
+        maxIterations = Coalesce $config['maxIterations'] 10
+    }
+}
+
 function Run-Cli { 
     $cliArgs = $script:ScriptArgs
     if ($cliArgs -contains '-h' -or $cliArgs -contains '--help') {
@@ -591,6 +715,7 @@ function Run-Cli {
         Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: `$env:RALPH_INITIAL_BACKOFF)"
         Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"
         Write-Host "  --enable-adaptive            Enable adaptive profile switching (rate limits/quota/iteration progress)"
+        Write-Host "  --adaptive-strategy STRATEGY Adaptive strategy: quality, price, or balanced (default: balanced)"
         Write-Host "  -h, --help                   Show this help message"
         exit 0
     }
@@ -611,122 +736,9 @@ function Run-Cli {
     $initialBackoff = $script:InitialBackoff
     $throttleDelay = $script:ThrottleDelay
     $enableAdaptive = $false
+    $adaptiveStrategy = 'balanced'
     $currentProfile = Coalesce $script:CurrentProfile ''
 
-    # Helper function to test if adaptive profile switch is needed
-    function Test-AdaptiveProfileSwitch {
-        param(
-            [string]$SessionId,
-            [int]$CurrentIteration,
-            [string]$WorkerOutput,
-            [string]$ReviewerOutput,
-            [string]$Feedback,
-            [string]$CurrentProfile
-        )
-        
-        # Get current profile's max iterations
-        $configRaw = Get-Config -SessionId $SessionId
-        $currentMaxIter = 10
-        if ($configRaw) {
-            $config = JsonToDict $configRaw
-            $currentMaxIter = [int](Coalesce $config['maxIterations'] 10)
-        }
-        
-        # Check for rate limit / quota errors in worker output
-        if ($WorkerOutput -and ($WorkerOutput -match '(?i)(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled)')) {
-            # Rate limit detected - switch to higher tier if available
-            if ($CurrentProfile -ne 'ultra') {
-                return 'ultra'
-            }
-        }
-        
-        # Check for rate limit / quota errors in reviewer output
-        if ($ReviewerOutput -and ($ReviewerOutput -match '(?i)(rate_limit|rate limit|429|quota_exceeded|quota exceeded|resource_exhausted|resource exhausted|too many requests|overloaded|throttled)')) {
-            if ($CurrentProfile -ne 'ultra') {
-                return 'ultra'
-            }
-        }
-        
-        # Check for resource exhaustion in feedback
-        if ($Feedback -and ($Feedback -match '(?i)(resource|memory|cpu|quota|limit)')) {
-            if ($CurrentProfile -ne 'ultra') {
-                return 'ultra'
-            }
-        }
-        
-        # Check iteration count - if we're past 50% of max iterations and not on highest tier
-        if ($CurrentIteration -gt ($currentMaxIter / 2) -and $CurrentProfile -ne 'ultra' -and $CurrentProfile -ne 'super') {
-            return 'super'
-        }
-        
-        # Check if we're past 75% of max iterations and not on highest tier
-        if ($CurrentIteration -gt (0.75 * $currentMaxIter) -and $CurrentProfile -ne 'ultra') {
-            return 'ultra'
-        }
-        
-        return $null
-    }
-
-    # Helper function to apply a profile
-    function Apply-Profile {
-        param(
-            [string]$SessionId,
-            [string]$ProfileName
-        )
-        
-        $profilePath = "profiles/$ProfileName.json"
-        if (-not (Test-Path $profilePath)) {
-            Write-Host "[ERROR] Profile file not found: $profilePath" -ForegroundColor Red
-            return
-        }
-        
-        $profile = Get-Content $profilePath -Raw | ConvertFrom-Json
-        
-        # Update config with profile settings
-        $config = @{
-            workerModel = $profile.workerModel
-            workerProvider = $profile.workerProvider
-            workerAgent = $profile.workerAgent
-            reviewerModel = $profile.reviewerModel
-            reviewerProvider = $profile.reviewerProvider
-            reviewerAgent = $profile.reviewerAgent
-            monitorModel = $profile.monitorModel
-            monitorProvider = $profile.monitorProvider
-            monitorAgent = $profile.monitorAgent
-            maxIterations = $profile.maxIterations
-            crossModelReviewEnforced = $true
-            workGuidelines = $profile.workGuidelines
-            reviewGuidelines = $profile.reviewGuidelines
-            configuredAt = (Get-Date).ToString('o')
-        }
-        $config | ConvertTo-Json -Depth 10 | Set-Content -Path (Get-StateFile -SessionId $SessionId -FileName 'config.json') -Encoding UTF8
-        
-        Write-Host "[ADAPTIVE] Applied profile: $ProfileName" -ForegroundColor Green
-    }
-
-    # Helper function to switch profile and return new config values
-    function Switch-AdaptiveProfile {
-        param(
-            [string]$SessionId,
-            [string]$NewProfile,
-            [string]$OldProfile = ''
-        )
-        Write-Host "[ADAPTIVE] Switching profile from '$OldProfile' to '$NewProfile'" -ForegroundColor Cyan
-        Apply-Profile -SessionId $SessionId -ProfileName $NewProfile
-        $config = Get-Config -SessionId $SessionId | JsonToDict
-        return @{
-            workerModel = Coalesce $config['workerModel'] ''
-            workerProvider = Coalesce $config['workerProvider'] ''
-            workerAgent = Coalesce $config['workerAgent'] 'goose'
-            reviewerModel = Coalesce $config['reviewerModel'] ''
-            reviewerProvider = Coalesce $config['reviewerProvider'] ''
-            reviewerAgent = Coalesce $config['reviewerAgent'] 'goose'
-            monitorModel = Coalesce $config['monitorModel'] ''
-            monitorProvider = Coalesce $config['monitorProvider'] ''
-            monitorAgent = Coalesce $config['monitorAgent'] 'goose'
-            maxIterations = Coalesce $config['maxIterations'] 10
-        }
-    }
 
     # Parse command line arguments.
     # Flags are consumed by name; the last positional (non-flag) argument is the task.
@@ -751,13 +763,14 @@ function Run-Cli {
             '--initial-backoff' { $initialBackoff = [int]$cliArgs[$i+1]; $i++ }
             '--throttle-delay' { $throttleDelay = [int]$cliArgs[$i+1]; $i++ }
             '--enable-adaptive' { $enableAdaptive = $true }
+            '--adaptive-strategy' { $adaptiveStrategy = $cliArgs[$i+1]; $i++ }
             default { $positionalArgs += $cliArgs[$i] }
         }
     }
     # Last positional argument is the task
     $taskInput = if ($positionalArgs.Count -gt 0) { $positionalArgs[-1] } else { '' }
     $task = if (Test-Path $taskInput) { Get-Content $taskInput -Raw } else { $taskInput }
-    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; Write-Host ""; Write-Host "Options:" -ForegroundColor Cyan; Write-Host "  --worker-model MODEL         Worker model (default: `$env:RALPH_WORKER_MODEL)"; Write-Host "  --worker-provider PROVIDER   Worker provider (default: `$env:RALPH_WORKER_PROVIDER)"; Write-Host "  --worker-agent AGENT         Worker agent (default: `$env:RALPH_WORKER_AGENT)"; Write-Host "  --reviewer-model MODEL       Reviewer model (default: `$env:RALPH_REVIEWER_MODEL)"; Write-Host "  --reviewer-provider PROVIDER Reviewer provider (default: `$env:RALPH_REVIEWER_PROVIDER)"; Write-Host "  --reviewer-agent AGENT       Reviewer agent (default: `$env:RALPH_REVIEWER_AGENT)"; Write-Host "  --monitor-model MODEL        Monitor model (default: `$env:RALPH_MONITOR_MODEL)"; Write-Host "  --monitor-provider PROVIDER  Monitor provider (default: `$env:RALPH_MONITOR_PROVIDER)"; Write-Host "  --monitor-agent AGENT        Monitor agent (default: `$env:RALPH_MONITOR_AGENT)"; Write-Host "  --max-iterations N           Max iterations, -1 for infinite (default: `$env:RALPH_MAX_ITERATIONS)"; Write-Host "  --work-guidelines FILE       Work guidelines/recipe file (default: `$env:RALPH_WORK_GUIDELINES)"; Write-Host "  --review-guidelines FILE     Review guidelines/recipe file (default: `$env:RALPH_REVIEW_GUIDELINES)"; Write-Host "  --session-id ID              Session ID (default: auto-generated)"; Write-Host "  --max-retries N              Max retry attempts for rate limits (default: `$env:RALPH_MAX_RETRIES)"; Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: `$env:RALPH_INITIAL_BACKOFF)"; Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"; Write-Host "  --enable-adaptive            Enable adaptive profile switching based on rate limits, quota errors, resource exhaustion, and iteration progress"; exit 1 }
+    if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; Write-Host ""; Write-Host "Options:" -ForegroundColor Cyan; Write-Host "  --worker-model MODEL         Worker model (default: `$env:RALPH_WORKER_MODEL)"; Write-Host "  --worker-provider PROVIDER   Worker provider (default: `$env:RALPH_WORKER_PROVIDER)"; Write-Host "  --worker-agent AGENT         Worker agent (default: `$env:RALPH_WORKER_AGENT)"; Write-Host "  --reviewer-model MODEL       Reviewer model (default: `$env:RALPH_REVIEWER_MODEL)"; Write-Host "  --reviewer-provider PROVIDER Reviewer provider (default: `$env:RALPH_REVIEWER_PROVIDER)"; Write-Host "  --reviewer-agent AGENT       Reviewer agent (default: `$env:RALPH_REVIEWER_AGENT)"; Write-Host "  --monitor-model MODEL        Monitor model (default: `$env:RALPH_MONITOR_MODEL)"; Write-Host "  --monitor-provider PROVIDER  Monitor provider (default: `$env:RALPH_MONITOR_PROVIDER)"; Write-Host "  --monitor-agent AGENT        Monitor agent (default: `$env:RALPH_MONITOR_AGENT)"; Write-Host "  --max-iterations N           Max iterations, -1 for infinite (default: `$env:RALPH_MAX_ITERATIONS)"; Write-Host "  --work-guidelines FILE       Work guidelines/recipe file (default: `$env:RALPH_WORK_GUIDELINES)"; Write-Host "  --review-guidelines FILE     Review guidelines/recipe file (default: `$env:RALPH_REVIEW_GUIDELINES)"; Write-Host "  --session-id ID              Session ID (default: auto-generated)"; Write-Host "  --max-retries N              Max retry attempts for rate limits (default: `$env:RALPH_MAX_RETRIES)"; Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: `$env:RALPH_INITIAL_BACKOFF)"; Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"; Write-Host "  --enable-adaptive            Enable adaptive profile switching based on rate limits, quota errors, resource exhaustion, and low quality output"; Write-Host "  --adaptive-strategy STRATEGY Adaptive strategy: quality, price, or balanced (default: balanced)"; exit 1 }
 
     # Update script-level retry config from CLI options
     $script:MaxRetries = $maxRetries
@@ -789,6 +802,20 @@ function Run-Cli {
     if ($maxIterations -eq -1) { Write-Host "Max Iterations: unlimited" } else { Write-Host "Max Iterations: $maxIterations" }
     Write-Host ""
 
+    # Validate adaptive strategy and resolve start profile
+    if ($enableAdaptive) {
+        if ($script:AdaptiveOrders -notcontains $adaptiveStrategy) {
+            Write-Host "[WARNING] Unknown adaptive strategy '$adaptiveStrategy'; falling back to 'balanced'." -ForegroundColor Yellow
+            $adaptiveStrategy = 'balanced'
+        }
+        if (-not $currentProfile) {
+            $currentProfile = $script:AdaptiveOrders[$adaptiveStrategy]['start']
+            Write-Host "[ADAPTIVE] Strategy '$adaptiveStrategy' (start profile '$currentProfile')" -ForegroundColor Cyan
+        } else {
+            Write-Host "[ADAPTIVE] Strategy '$adaptiveStrategy' (starting from '$currentProfile')" -ForegroundColor Cyan
+        }
+    }
+
     Set-Task -SessionId $sessionId -Task $task
     Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $true -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
 
@@ -813,7 +840,7 @@ function Run-Cli {
         
         if ($workerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $workerOutput)) {
             if ($enableAdaptive) {
-                $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
+                $newProfile = Get-AdaptiveProfileSwitch -Strategy $adaptiveStrategy -Trigger 'resource' -CurrentProfile $currentProfile
                 if ($newProfile -and $newProfile -ne $currentProfile) {
                     $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
                     $currentProfile = $newProfile
@@ -852,7 +879,7 @@ function Run-Cli {
         
         if ($reviewerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $reviewerOutput)) {
             if ($enableAdaptive) {
-                $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
+                $newProfile = Get-AdaptiveProfileSwitch -Strategy $adaptiveStrategy -Trigger 'resource' -CurrentProfile $currentProfile
                 if ($newProfile -and $newProfile -ne $currentProfile) {
                     $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
                     $currentProfile = $newProfile
@@ -896,9 +923,12 @@ function Run-Cli {
             Write-Host $feedback
             Write-Host ""
 
-            # Adaptive profile switching based on iteration progress (no rate limit hit this round)
+            # Adaptive profile switching based on output quality or resource constraints
             if ($enableAdaptive) {
-                $newProfile = Test-AdaptiveProfileSwitch -SessionId $sessionId -CurrentIteration $iteration -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback -CurrentProfile $currentProfile
+                $trigger = ''
+                if (Test-QualityTrigger -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback) { $trigger = 'quality' }
+                elseif (Test-ResourceTrigger -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback) { $trigger = 'resource' }
+                $newProfile = if ($trigger) { Get-AdaptiveProfileSwitch -Strategy $adaptiveStrategy -Trigger $trigger -CurrentProfile $currentProfile } else { $null }
                 if ($newProfile -and $newProfile -ne $currentProfile) {
                     $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
                     $currentProfile = $newProfile
@@ -1130,12 +1160,25 @@ function Handle-Run {
     $monitorModel = Coalesce $paramsObj['monitorModel'] $script:MonitorModel
     $monitorProvider = Coalesce $paramsObj['monitorProvider'] $script:MonitorProvider
     $monitorAgent = Coalesce $paramsObj['monitorAgent'] $script:MonitorAgent
+    $enableAdaptive = Coalesce $paramsObj['enableAdaptive'] $false
+    $adaptiveStrategy = Coalesce $paramsObj['adaptiveStrategy'] 'balanced'
+    $currentProfile = Coalesce $paramsObj['profile'] ''
 
     if (-not $task) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'Task is required' } }
     if (-not $workerModel -or -not $workerProvider -or -not $reviewerModel -or -not $reviewerProvider) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'workerModel, workerProvider, reviewerModel, and reviewerProvider are required' } }
 
     Set-Task -SessionId $sessionId -Task $task
     Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+
+    # Validate adaptive strategy and resolve start profile
+    if ($enableAdaptive) {
+        if ($script:AdaptiveOrders -notcontains $adaptiveStrategy) {
+            $adaptiveStrategy = 'balanced'
+        }
+        if (-not $currentProfile) {
+            $currentProfile = $script:AdaptiveOrders[$adaptiveStrategy]['start']
+        }
+    }
 
     $feedback = ''
 
@@ -1147,8 +1190,21 @@ function Handle-Run {
         $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting ($i -gt 1)
         
         if ($workerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $workerOutput)) {
-            Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
-            return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Rate limit, quota error, or no output from worker' }
+            if ($enableAdaptive) {
+                $newProfile = Get-AdaptiveProfileSwitch -Strategy $adaptiveStrategy -Trigger 'resource' -CurrentProfile $currentProfile
+                if ($newProfile -and $newProfile -ne $currentProfile) {
+                    $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
+                    $currentProfile = $newProfile
+                    $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
+                    $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
+                    $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                    $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting ($i -gt 1)
+                }
+            }
+            if ($workerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $workerOutput)) {
+                Block-Iteration -SessionId $sessionId -Reason 'WORK PHASE FAILED - Rate limit or quota error from worker LLM'
+                return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'WORK PHASE FAILED - Rate limit, quota error, or no output from worker' }
+            }
         }
 
         # Save worker output to file for Monitor LLM fallback
@@ -1166,8 +1222,21 @@ function Handle-Run {
         $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting ($i -gt 1)
         
         if ($reviewerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $reviewerOutput)) {
-            Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
-            return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer' }
+            if ($enableAdaptive) {
+                $newProfile = Get-AdaptiveProfileSwitch -Strategy $adaptiveStrategy -Trigger 'resource' -CurrentProfile $currentProfile
+                if ($newProfile -and $newProfile -ne $currentProfile) {
+                    $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
+                    $currentProfile = $newProfile
+                    $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
+                    $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
+                    $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                    $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting ($i -gt 1)
+                }
+            }
+            if ($reviewerOutput -like 'RATE_LIMIT_EXCEEDED*' -or (-not $reviewerOutput)) {
+                Block-Iteration -SessionId $sessionId -Reason 'REVIEW PHASE FAILED - Rate limit or quota error from reviewer LLM'
+                return New-JsonResponse -Id $Id -Error @{ code = -32603; message = 'REVIEW PHASE FAILED - Rate limit, quota error, or no output from reviewer' }
+            }
         }
 
         # Save reviewer output to file for Monitor LLM fallback
@@ -1184,6 +1253,21 @@ function Handle-Run {
             $status = Get-Status -SessionId $sessionId -MaxIterations $maxIterations | JsonToDict
             $result = @{ success = $true; message = "SHIPPED after $i iteration(s)"; status = $status; shipped = $true; iterations = $i }
             return New-JsonResponse -Id $Id -Result ($result | ConvertTo-Json -Depth 10)
+        }
+
+        # Adaptive profile switching based on output quality or resource constraints
+        if ($enableAdaptive) {
+            $trigger = ''
+            if (Test-QualityTrigger -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback) { $trigger = 'quality' }
+            elseif (Test-ResourceTrigger -WorkerOutput $workerOutput -ReviewerOutput $reviewerOutput -Feedback $feedback) { $trigger = 'resource' }
+            $newProfile = if ($trigger) { Get-AdaptiveProfileSwitch -Strategy $adaptiveStrategy -Trigger $trigger -CurrentProfile $currentProfile } else { $null }
+            if ($newProfile -and $newProfile -ne $currentProfile) {
+                $sw = Switch-AdaptiveProfile -SessionId $sessionId -NewProfile $newProfile -OldProfile $currentProfile
+                $currentProfile = $newProfile
+                $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
+                $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
+                $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+            }
         }
     }
 
@@ -1341,6 +1425,8 @@ function Handle-ListTools {
                     crossModelReviewEnforced = @{ type = 'boolean'; description = 'Enforce cross-model review validation (default: true)' }
                     workGuidelines = @{ type = 'string'; description = 'Path to work recipe or guidelines file' }
                     reviewGuidelines = @{ type = 'string'; description = 'Path to review recipe or guidelines file' }
+                    enableAdaptive = @{ type = 'boolean'; description = 'Enable adaptive profile switching (default: false)' }
+                    adaptiveStrategy = @{ type = 'string'; enum = @('quality', 'price', 'balanced'); description = 'Adaptive switching strategy (default: balanced)' }
                 }
                 required = @('task', 'workerModel', 'workerProvider', 'reviewerModel', 'reviewerProvider')
             }
