@@ -330,8 +330,8 @@ get_adaptive_profile_switch() {
         quality:quality)     order=(lite plus pro super ultra) ;;
         price:resource)      order=(ultra super pro plus lite) ;;
         price:quality)       order=(lite plus pro super ultra) ;;
-        balanced:resource)   order=(pro lite plus) ;;
-        balanced:quality)    order=(pro ultra super) ;;
+        balanced:resource)   order=(pro plus lite) ;;
+        balanced:quality)    order=(pro super ultra) ;;
         *)                   echo ""; return ;;
     esac
 
@@ -350,13 +350,9 @@ get_adaptive_profile_switch() {
         return
     fi
 
-    if [[ ${idx} -ge $(( ${#order[@]} - 1 )) ]]; then
-        # Already at the end of the order.
-        echo ""
-        return
-    fi
-
-    echo "${order[$(( idx + 1 ))]}"
+    # Cycle back to the start of the order when reaching the end
+    local next_idx=$(( (idx + 1) % ${#order[@]} ))
+    echo "${order[$next_idx]}"
 }
 
 # Switch profile and echo back the new config values as pipe-delimited:

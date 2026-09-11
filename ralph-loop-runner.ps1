@@ -575,7 +575,7 @@ function Parse-ReviewerOutput {
 $script:AdaptiveOrders = @{
     'quality'  = @{ resource = @('ultra','super','pro','plus','lite'); quality = @('lite','plus','pro','super','ultra'); start = 'ultra' }
     'price'    = @{ resource = @('ultra','super','pro','plus','lite'); quality = @('lite','plus','pro','super','ultra'); start = 'lite' }
-    'balanced' = @{ resource = @('pro','lite','plus'); quality = @('pro','ultra','super'); start = 'pro' }
+    'balanced' = @{ resource = @('pro','plus','lite'); quality = @('pro','super','ultra'); start = 'pro' }
 }
 
 # Detect a resource/rate-limit trigger in the combined output/feedback.
@@ -626,8 +626,8 @@ function Get-AdaptiveProfileSwitch {
 
     $idx = [Array]::IndexOf($order, $CurrentProfile)
     if ($idx -eq -1) { return $order[0] }
-    if ($idx -ge ($order.Count - 1)) { return $null }  # already at the end
-    return $order[$idx + 1]
+    # Cycle back to the start of the order when reaching the end
+    return $order[($idx + 1) % $order.Count]
 }
 
 # Helper function to apply a profile
