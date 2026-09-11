@@ -323,6 +323,25 @@ get_adaptive_profile_switch() {
     local strategy="${1}"
     local trigger="${2}"
     local current_profile="${3}"
+
+    # 'balanced' uses a direct (profile, trigger) -> next profile transition table.
+    if [[ "${strategy}" == "balanced" ]]; then
+        case "${current_profile}:${trigger}" in
+            pro:quality)      echo "super" ;;
+            pro:resource)     echo "plus" ;;
+            super:quality)    echo "ultra" ;;
+            super:resource)   echo "lite" ;;
+            ultra:quality)    echo "pro" ;;
+            ultra:resource)   echo "pro" ;;
+            plus:quality)     echo "ultra" ;;
+            plus:resource)    echo "lite" ;;
+            lite:quality)     echo "pro" ;;
+            lite:resource)    echo "pro" ;;
+            *)                echo "pro" ;;
+        esac
+        return
+    fi
+
     local order=()
 
     case "${strategy}:${trigger}" in
@@ -330,8 +349,6 @@ get_adaptive_profile_switch() {
         quality:quality)     order=(lite plus pro super ultra) ;;
         price:resource)      order=(ultra super pro plus lite) ;;
         price:quality)       order=(lite plus pro super ultra) ;;
-        balanced:resource)   order=(pro plus lite) ;;
-        balanced:quality)    order=(pro super ultra) ;;
         *)                   echo ""; return ;;
     esac
 
