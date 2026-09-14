@@ -941,7 +941,7 @@ function Run-Cli {
             if (-not $workGuidelines -and $profile.workGuidelines) { $workGuidelines = $profile.workGuidelines }
             if (-not $reviewGuidelines -and $profile.reviewGuidelines) { $reviewGuidelines = $profile.reviewGuidelines }
             if ($profile.maxIterations) { $maxIterations = [int]$profile.maxIterations }
-            if ($profile.initialBackoff) { $initialBackoff = [int]$profile.initialBackoff 
+            if ($profile.initialBackoff) { $initialBackoff = [int]$profile.initialBackoff }
             if ($profile.throttleDelay) { $throttleDelay = [int]$profile.throttleDelay }
             # Extract profile name for tracking
             $currentProfile = Split-Path $profilePath -Leaf
