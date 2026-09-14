@@ -4,6 +4,7 @@ dist/
 .env
 .DS_Store
 Thumbs.db
+.ralph/
 notes/check.txt
 node_modules/
 debates/

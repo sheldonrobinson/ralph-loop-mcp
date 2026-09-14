@@ -16,7 +16,46 @@ $ErrorActionPreference = 'Stop'
 function Coalesce { param($Value, $Default); if ($null -ne $Value -and $Value -ne '') { return $Value }; return $Default }
 
 # Helper: Safely convert JSON to dictionary
-function JsonToDict { param([string]$Json); $obj = $Json | ConvertFrom-Json; if ($obj -isnot [System.Management.Automation.PSCustomObject]) { return @{ value = $obj } }; $dict = @{}; foreach ($prop in $obj.PSObject.Properties) { $val = $prop.Value; if ($val -is [System.Management.Automation.PSCustomObject]) { $val = $val | ConvertTo-Json -Depth 10 | ConvertFrom-Json }; $dict[$prop.Name] = $val }; return $dict }
+function JsonToDict { 
+    param($Json)
+    # Handle already-parsed hashtable/dictionary input (from MCP protocol)
+    if ($Json -is [System.Collections.IDictionary] -or $Json -is [System.Collections.Hashtable]) {
+        return $Json
+    }
+    # Handle string input (JSON)
+    if ($Json -is [string]) {
+        $obj = $Json | ConvertFrom-Json
+        return ConvertTo-Hashtable $obj
+    }
+    # Fallback: wrap in hashtable
+    return @{ value = $Json }
+}
+
+function ConvertTo-Hashtable {
+    param($InputObject)
+    if ($InputObject -isnot [System.Management.Automation.PSCustomObject]) {
+        return $InputObject
+    }
+    $dict = @{}
+    foreach ($prop in $InputObject.PSObject.Properties) {
+        $val = $prop.Value
+        if ($val -is [System.Management.Automation.PSCustomObject]) {
+            $val = ConvertTo-Hashtable $val
+        } elseif ($val -is [System.Collections.ArrayList] -or $val -is [Array]) {
+            $newArr = @()
+            foreach ($item in $val) {
+                if ($item -is [System.Management.Automation.PSCustomObject]) {
+                    $newArr += ConvertTo-Hashtable $item
+                } else {
+                    $newArr += $item
+                }
+            }
+            $val = $newArr
+        }
+        $dict[$prop.Name] = $val
+    }
+    return $dict
+}
 
 # Ensure jq is available
 if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
@@ -28,7 +67,11 @@ if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
 # =============================================================================
 # CONFIGURATION (from environment variables with defaults)
 # =============================================================================
-$script:RalphStateBase = Join-Path (Join-Path $env:USERPROFILE '.goose') 'ralph'
+# Workspace directory: base for resolving relative paths (profiles, task files, guidelines).
+# Defaults to the current working directory; overridable via --workspace.
+$script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:Workspace = (Get-Location).Path
+$script:RalphStateBase = Join-Path $script:Workspace '.ralph'
 $script:RalphRecipeDir = Coalesce $env:RALPH_RECIPE_DIR '/usr/local/share/ralph-loop-runner/recipes'
 $script:SafeCommands = @('ls', 'pwd', 'echo', 'date', 'cat', 'mkdir', 'rm', 'cp', 'mv', 'jq')
 $script:CmdTimeout = 30
@@ -51,6 +94,9 @@ $script:ReviewGuidelines = Coalesce $env:RALPH_REVIEW_GUIDELINES (Join-Path $scr
 $script:MonitorModel = Coalesce $env:RALPH_MONITOR_MODEL ''
 $script:MonitorProvider = Coalesce $env:RALPH_MONITOR_PROVIDER ''
 $script:MonitorAgent = Coalesce $env:RALPH_MONITOR_AGENT 'goose'
+
+# Initialize profile tracking variable
+$script:CurrentProfile = ''
 
 # Profile support via environment variable
 if ($env:RALPH_PROFILE -and (Test-Path $env:RALPH_PROFILE)) {
@@ -80,7 +126,6 @@ if ($env:RALPH_PROFILE -and (Test-Path $env:RALPH_PROFILE)) {
 # CLI argument placeholders
 $script:CLITask = ''
 $script:CLISessionId = ''
-$script:CurrentProfile = Coalesce $script:CurrentProfile ''
 
 # =============================================================================
 # UTILITY FUNCTIONS (shared by both modes)
@@ -88,6 +133,29 @@ $script:CurrentProfile = Coalesce $script:CurrentProfile ''
 function Get-StateDir { param([string]$SessionId = 'default'); return Join-Path $script:RalphStateBase $SessionId }
 function Get-StateFile { param([string]$SessionId = 'default', [string]$FileName); return Join-Path (Get-StateDir -SessionId $SessionId) $FileName }
 function Ensure-StateDir { param([string]$SessionId = 'default'); $dir = Get-StateDir -SessionId $SessionId; if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null } }
+
+# Resolve a profile name/path to an existing file.
+# Search order:
+#   1. $Workspace/profiles/<name>.json
+#   2. $Workspace/profiles/<name>   (name already has extension)
+#   3. $Workspace/<name>  (explicit path relative to workspace)
+#   4. <name> as literal (absolute or CWD-relative) path
+#   5. Script's own profiles/ dir (fallback when run outside the project)
+function Resolve-ProfilePath {
+    param([string]$ProfileName)
+    $candidates = @(
+        (Join-Path (Join-Path $script:Workspace 'profiles') "$ProfileName.json"),
+        (Join-Path (Join-Path $script:Workspace 'profiles') $ProfileName),
+        (Join-Path $script:Workspace $ProfileName),
+        $ProfileName,
+        (Join-Path (Join-Path $script:ScriptDir 'profiles') "$ProfileName.json"),
+        (Join-Path (Join-Path $script:ScriptDir 'profiles') $ProfileName)
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return (Resolve-Path $c).Path }
+    }
+    return $null
+}
 function ConvertTo-JsonEscaped { param([string]$Input); return ($Input | ConvertTo-Json -Compress -Depth 10).Trim('"') }
 function New-JsonResponse { param($Id, [string]$Result = '', [hashtable]$Error = $null); $resp = @{ jsonrpc = '2.0' }; if ($null -ne $Id -and $Id -ne 'null') { $resp.id = $Id } else { $resp.id = $null }; if ($null -ne $Error) { $resp.error = $Error } else { $resp.result = if ($Result) { $Result | ConvertFrom-Json } else { @{} } }; return $resp | ConvertTo-Json -Compress -Depth 10 }
 
@@ -160,27 +228,33 @@ function Set-Config {
         [string]$ReviewGuidelines = '',
         [string]$MonitorModel = '',
         [string]$MonitorProvider = '',
-        [string]$MonitorAgent = 'goose'
+        [string]$MonitorAgent = 'goose',
+        [int]$InitialBackoff = 5,
+        [int]$ThrottleDelay = 0
+        
     )
     Ensure-StateDir -SessionId $SessionId
     $configFile = Get-StateFile -SessionId $SessionId -FileName 'config.json'
-    $config = @{
-        workerModel = $WorkerModel
-        workerProvider = $WorkerProvider
-        workerAgent = $WorkerAgent
-        reviewerModel = $ReviewerModel
-        reviewerProvider = $ReviewerProvider
-        reviewerAgent = $ReviewerAgent
-        monitorModel = $MonitorModel
-        monitorProvider = $MonitorProvider
-        monitorAgent = $MonitorAgent
+    $configObj = [PSCustomObject]@{
+        workerModel = [string]$WorkerModel
+        workerProvider = [string]$WorkerProvider
+        workerAgent = [string]$WorkerAgent
+        reviewerModel = [string]$ReviewerModel
+        reviewerProvider = [string]$ReviewerProvider
+        reviewerAgent = [string]$ReviewerAgent
+        monitorModel = [string]$MonitorModel
+        monitorProvider = [string]$MonitorProvider
+        monitorAgent = [string]$MonitorAgent
         maxIterations = $MaxIterations
+        initialBackoff = $InitialBackoff
+        throttleDelay = $ThrottleDelay
         crossModelReviewEnforced = $CrossModelEnforced
-        workGuidelines = $WorkGuidelines
-        reviewGuidelines = $ReviewGuidelines
+        workGuidelines = [string]$WorkGuidelines
+        reviewGuidelines = [string]$ReviewGuidelines
         configuredAt = (Get-Date).ToString('o')
     }
-    $config | ConvertTo-Json -Depth 10 | Set-Content -Path $configFile -Encoding UTF8 
+    $json = ConvertTo-Json -InputObject $configObj -Depth 10
+    $json | Set-Content -Path $configFile -Encoding UTF8 
 }
 
 function Get-Config { param([string]$SessionId = 'default'); $configFile = Get-StateFile -SessionId $SessionId -FileName 'config.json'; if (Test-Path $configFile) { return Get-Content $configFile -Raw -Encoding UTF8 }; return '' }
@@ -209,8 +283,12 @@ function Set-Task {
     param([string]$SessionId, [string]$Task)
     Ensure-StateDir -SessionId $SessionId
     $taskFile = Get-StateFile -SessionId $SessionId -FileName 'task.json'
-    $task = @{ task = $Task; createdAt = (Get-Date).ToString('o') }
-    $task | ConvertTo-Json -Depth 10 | Set-Content -Path $taskFile -Encoding UTF8
+    $taskObj = [PSCustomObject]@{
+        task = [string]$Task
+        createdAt = (Get-Date).ToString('o')
+    }
+    $json = ConvertTo-Json -InputObject $taskObj -Depth 10
+    $json | Set-Content -Path $taskFile -Encoding UTF8
     $blockedFile = Get-StateFile -SessionId $SessionId -FileName 'RALPH-BLOCKED.md'
     if (Test-Path $blockedFile) { Remove-Item $blockedFile -Force }
 }
@@ -223,21 +301,27 @@ function Get-Task { param([string]$SessionId = 'default'); $taskFile = Get-State
 function Set-Work { 
     param([string]$SessionId, [string]$Work, [string]$Summary, [int]$Iteration)
     Ensure-StateDir -SessionId $SessionId
-    $workFile = Get-StateFile -SessionId $SessionId -FileName ''
-    $workObj = @{ work = $Work; summary = $Summary; submittedAt = (Get-Date).ToString('o'); iteration = $Iteration }
-    $workObj | ConvertTo-Json -Depth 10 | Set-Content -Path $workFile -Encoding UTF8
+    $workFile = Get-StateFile -SessionId $SessionId -FileName 'work.json'
+    $workObj = [PSCustomObject]@{
+        work = [string]$Work
+        summary = [string]$Summary
+        submittedAt = (Get-Date).ToString('o')
+        iteration = $Iteration
+    }
+    $json = ConvertTo-Json -InputObject $workObj -Depth 10
+    $json | Set-Content -Path $workFile -Encoding UTF8
     $completeFile = Get-StateFile -SessionId $SessionId -FileName 'work-complete.txt'
     '{"ok":true}' | Set-Content -Path $completeFile -Encoding UTF8
 
     # Iteration History Persistence
     $histDir = Join-Path (Join-Path (Get-StateDir -SessionId $SessionId) 'history') "iteration_$Iteration"
     if (-not (Test-Path $histDir)) { New-Item -ItemType Directory -Path $histDir -Force | Out-Null }
-    Copy-Item -Path $workFile -Destination (Join-Path $histDir '') -Force
+    Copy-Item -Path $workFile -Destination (Join-Path $histDir 'work.json') -Force
     $workOutFile = Get-StateFile -SessionId $SessionId -FileName 'work.out'
     if (Test-Path $workOutFile) { Copy-Item -Path $workOutFile -Destination (Join-Path $histDir 'work.out') -Force }
 }
 
-function Get-Work { param([string]$SessionId = 'default'); $workFile = Get-StateFile -SessionId $SessionId -FileName ''; if (Test-Path $workFile) { return Get-Content $workFile -Raw -Encoding UTF8 }; return '' }
+function Get-Work { param([string]$SessionId = 'default'); $workFile = Get-StateFile -SessionId $SessionId -FileName 'work.json'; if (Test-Path $workFile) { return Get-Content $workFile -Raw -Encoding UTF8 }; return '' }
 
 # =============================================================================
 # REVIEW MANAGEMENT & ITERATION HISTORY
@@ -246,12 +330,22 @@ function Set-Review {
     param([string]$SessionId, [string]$Decision, [string]$Feedback, [int]$Iteration)
     Ensure-StateDir -SessionId $SessionId
     $reviewFile = Get-StateFile -SessionId $SessionId -FileName ''
-    $reviewObj = @{ decision = $Decision; feedback = $Feedback; reviewedAt = (Get-Date).ToString('o'); iteration = $Iteration }
-    $reviewObj | ConvertTo-Json -Depth 10 | Set-Content -Path $reviewFile -Encoding UTF8
+    $reviewObj = [PSCustomObject]@{
+        decision = [string]$Decision
+        feedback = [string]$Feedback
+        reviewedAt = (Get-Date).ToString('o')
+        iteration = $Iteration
+    }
+    $json = ConvertTo-Json -InputObject $reviewObj -Depth 10
+    $json | Set-Content -Path $reviewFile -Encoding UTF8
     $resultFile = Get-StateFile -SessionId $SessionId -FileName 'review-result.txt'
-    @{ decision = $Decision } | ConvertTo-Json -Compress -Depth 10 | Set-Content -Path $resultFile -Encoding UTF8
+    $resultObj = [PSCustomObject]@{ decision = [string]$Decision }
+    $json = ConvertTo-Json -InputObject $resultObj -Compress -Depth 10
+    $json | Set-Content -Path $resultFile -Encoding UTF8
     $feedbackFile = Get-StateFile -SessionId $SessionId -FileName 'review-feedback.txt'
-    @{ feedback = $Feedback } | ConvertTo-Json -Compress -Depth 10 | Set-Content -Path $feedbackFile -Encoding UTF8
+    $feedbackObj = [PSCustomObject]@{ feedback = [string]$Feedback }
+    $json = ConvertTo-Json -InputObject $feedbackObj -Compress -Depth 10
+    $json | Set-Content -Path $feedbackFile -Encoding UTF8
 
     # Iteration History Persistence
     $histDir = Join-Path (Join-Path (Get-StateDir -SessionId $SessionId) 'history') "iteration_$Iteration"
@@ -637,32 +731,33 @@ function Apply-Profile {
         [string]$ProfileName
     )
     
-    $profilePath = "profiles/$ProfileName.json"
-    if (-not (Test-Path $profilePath)) {
-        Write-Host "[ERROR] Profile file not found: $profilePath" -ForegroundColor Red
+    $profilePath = Resolve-ProfilePath -ProfileName $ProfileName
+    if (-not $profilePath) {
+        Write-Host "[ERROR] Profile file not found: $ProfileName" -ForegroundColor Red
         return
     }
     
     $profile = Get-Content $profilePath -Raw | ConvertFrom-Json
     
     # Update config with profile settings
-    $config = @{
-        workerModel = $profile.workerModel
-        workerProvider = $profile.workerProvider
-        workerAgent = $profile.workerAgent
-        reviewerModel = $profile.reviewerModel
-        reviewerProvider = $profile.reviewerProvider
-        reviewerAgent = $profile.reviewerAgent
-        monitorModel = $profile.monitorModel
-        monitorProvider = $profile.monitorProvider
-        monitorAgent = $profile.monitorAgent
+    $config = [PSCustomObject]@{
+        workerModel = [string]$profile.workerModel
+        workerProvider = [string]$profile.workerProvider
+        workerAgent = [string]$profile.workerAgent
+        reviewerModel = [string]$profile.reviewerModel
+        reviewerProvider = [string]$profile.reviewerProvider
+        reviewerAgent = [string]$profile.reviewerAgent
+        monitorModel = [string]$profile.monitorModel
+        monitorProvider = [string]$profile.monitorProvider
+        monitorAgent = [string]$profile.monitorAgent
         maxIterations = $profile.maxIterations
         crossModelReviewEnforced = $true
-        workGuidelines = $profile.workGuidelines
-        reviewGuidelines = $profile.reviewGuidelines
+        workGuidelines = [string]$profile.workGuidelines
+        reviewGuidelines = [string]$profile.reviewGuidelines
         configuredAt = (Get-Date).ToString('o')
     }
-    $config | ConvertTo-Json -Depth 10 | Set-Content -Path (Get-StateFile -SessionId $SessionId -FileName 'config.json') -Encoding UTF8
+    $json = ConvertTo-Json -InputObject $config -Depth 10
+    $json | Set-Content -Path (Get-StateFile -SessionId $SessionId -FileName 'config.json') -Encoding UTF8
     
     Write-Host "[ADAPTIVE] Applied profile: $ProfileName" -ForegroundColor Green
 }
@@ -716,6 +811,7 @@ function Run-Cli {
         Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"
         Write-Host "  --enable-adaptive            Enable adaptive profile switching (rate limits/quota/iteration progress)"
         Write-Host "  --adaptive-strategy STRATEGY Adaptive strategy: quality, price, or balanced (default: balanced)"
+        Write-Host "  --workspace DIR              Workspace directory (default: current working directory)"
         Write-Host "  -h, --help                   Show this help message"
         exit 0
     }
@@ -738,6 +834,8 @@ function Run-Cli {
     $enableAdaptive = $false
     $adaptiveStrategy = 'balanced'
     $currentProfile = Coalesce $script:CurrentProfile ''
+    $cliProfile = ''  # --profile argument value
+    $workspace = $script:Workspace  # --workspace argument value
 
 
     # Parse command line arguments.
@@ -764,18 +862,96 @@ function Run-Cli {
             '--throttle-delay' { $throttleDelay = [int]$cliArgs[$i+1]; $i++ }
             '--enable-adaptive' { $enableAdaptive = $true }
             '--adaptive-strategy' { $adaptiveStrategy = $cliArgs[$i+1]; $i++ }
+            '--profile' { $cliProfile = $cliArgs[$i+1]; $i++ }
+            '--workspace' { $workspace = $cliArgs[$i+1]; $i++ }
             default { $positionalArgs += $cliArgs[$i] }
         }
     }
+    # Normalize workspace: resolve to absolute path and update script state so
+    # all relative paths (profiles, task files, guidelines) resolve against it.
+    if ($workspace) {
+        $script:Workspace = (Resolve-Path -Path $workspace -ErrorAction SilentlyContinue).Path
+        if (-not $script:Workspace) { $script:Workspace = $workspace }
+        $script:RalphStateBase = Join-Path $script:Workspace '.ralph'
+    }
+
     # Last positional argument is the task
     $taskInput = if ($positionalArgs.Count -gt 0) { $positionalArgs[-1] } else { '' }
-    $task = if (Test-Path $taskInput) { Get-Content $taskInput -Raw } else { $taskInput }
+    # Resolve task file path relative to workspace first, then as-is.
+    $taskFilePath = $null
+    if ($taskInput) {
+        if (Test-Path $taskInput) { $taskFilePath = $taskInput }
+        elseif (Test-Path (Join-Path $script:Workspace $taskInput)) { $taskFilePath = (Join-Path $script:Workspace $taskInput) }
+    }
+    $task = if ($taskFilePath) { Get-Content $taskFilePath -Raw } else { $taskInput }
     if (-not $task) { Write-Host "Error: No task provided" -ForegroundColor Red; Write-Host "Usage: .\ralph-loop-runner.ps1 [options] \"task description\" or .\ralph-loop-runner.ps1 [options] path/to/task.md" -ForegroundColor Red; Write-Host ""; Write-Host "Options:" -ForegroundColor Cyan; Write-Host "  --worker-model MODEL         Worker model (default: `$env:RALPH_WORKER_MODEL)"; Write-Host "  --worker-provider PROVIDER   Worker provider (default: `$env:RALPH_WORKER_PROVIDER)"; Write-Host "  --worker-agent AGENT         Worker agent (default: `$env:RALPH_WORKER_AGENT)"; Write-Host "  --reviewer-model MODEL       Reviewer model (default: `$env:RALPH_REVIEWER_MODEL)"; Write-Host "  --reviewer-provider PROVIDER Reviewer provider (default: `$env:RALPH_REVIEWER_PROVIDER)"; Write-Host "  --reviewer-agent AGENT       Reviewer agent (default: `$env:RALPH_REVIEWER_AGENT)"; Write-Host "  --monitor-model MODEL        Monitor model (default: `$env:RALPH_MONITOR_MODEL)"; Write-Host "  --monitor-provider PROVIDER  Monitor provider (default: `$env:RALPH_MONITOR_PROVIDER)"; Write-Host "  --monitor-agent AGENT        Monitor agent (default: `$env:RALPH_MONITOR_AGENT)"; Write-Host "  --max-iterations N           Max iterations, -1 for infinite (default: `$env:RALPH_MAX_ITERATIONS)"; Write-Host "  --work-guidelines FILE       Work guidelines/recipe file (default: `$env:RALPH_WORK_GUIDELINES)"; Write-Host "  --review-guidelines FILE     Review guidelines/recipe file (default: `$env:RALPH_REVIEW_GUIDELINES)"; Write-Host "  --session-id ID              Session ID (default: auto-generated)"; Write-Host "  --max-retries N              Max retry attempts for rate limits (default: `$env:RALPH_MAX_RETRIES)"; Write-Host "  --initial-backoff N          Initial backoff seconds for retries (default: `$env:RALPH_INITIAL_BACKOFF)"; Write-Host "  --throttle-delay N           Delay between requests in seconds (default: `$env:RALPH_THROTTLE_DELAY)"; Write-Host "  --enable-adaptive            Enable adaptive profile switching based on rate limits, quota errors, resource exhaustion, and low quality output"; Write-Host "  --adaptive-strategy STRATEGY Adaptive strategy: quality, price, or balanced (default: balanced)"; exit 1 }
 
     # Update script-level retry config from CLI options
     $script:MaxRetries = $maxRetries
     $script:InitialBackoff = $initialBackoff
     $script:ThrottleDelay = $throttleDelay
+
+    # Validate adaptive strategy and resolve start profile EARLY so profile values can be used as defaults
+    if ($enableAdaptive) {
+        if (-not $script:AdaptiveOrders.ContainsKey($adaptiveStrategy)) {
+            Write-Host "[WARNING] Unknown adaptive strategy '$adaptiveStrategy'; falling back to 'balanced'." -ForegroundColor Yellow
+            $adaptiveStrategy = 'balanced'
+        }
+        if (-not $currentProfile) {
+            $currentProfile = $script:AdaptiveOrders[$adaptiveStrategy]['start']
+        }
+        
+        # Load adaptive profile settings to use as defaults (before prompts)
+        $profilePath = Resolve-ProfilePath -ProfileName $currentProfile
+        if ($profilePath) {
+            $profile = Get-Content $profilePath -Raw | ConvertFrom-Json
+            if (-not $workerModel -and $profile.workerModel) { $workerModel = $profile.workerModel }
+            if (-not $workerProvider -and $profile.workerProvider) { $workerProvider = $profile.workerProvider }
+            if (-not $workerAgent -and $profile.workerAgent) { $workerAgent = $profile.workerAgent }
+            if (-not $reviewerModel -and $profile.reviewerModel) { $reviewerModel = $profile.reviewerModel }
+            if (-not $reviewerProvider -and $profile.reviewerProvider) { $reviewerProvider = $profile.reviewerProvider }
+            if (-not $reviewerAgent -and $profile.reviewerAgent) { $reviewerAgent = $profile.reviewerAgent }
+            if (-not $monitorModel -and $profile.monitorModel) { $monitorModel = $profile.monitorModel }
+            if (-not $monitorProvider -and $profile.monitorProvider) { $monitorProvider = $profile.monitorProvider }
+            if (-not $monitorAgent -and $profile.monitorAgent) { $monitorAgent = $profile.monitorAgent }
+            if (-not $workGuidelines -and $profile.workGuidelines) { $workGuidelines = $profile.workGuidelines }
+            if (-not $reviewGuidelines -and $profile.reviewGuidelines) { $reviewGuidelines = $profile.reviewGuidelines }
+            if ($profile.maxIterations -and $maxIterations -eq $script:MaxIterations) { $maxIterations = [int]$profile.maxIterations }
+            if ($profile.initialBackoff -and $initialBackoff -eq $script:InitialBackoff) { $initialBackoff = [int]$profile.initialBackoff }
+            if ($profile.throttleDelay -and $throttleDelay -eq $script:ThrottleDelay) { $throttleDelay = [int]$profile.throttleDelay }
+        }
+    }
+
+    # Load explicit --profile if provided (applies on top of adaptive or standalone)
+    if ($cliProfile) {
+        # Resolve profile path against workspace, then script dir, then literal path
+        $profilePath = Resolve-ProfilePath -ProfileName $cliProfile
+        
+        if ($profilePath) {
+            $profile = Get-Content $profilePath -Raw | ConvertFrom-Json
+            if (-not $workerModel -and $profile.workerModel) { $workerModel = $profile.workerModel }
+            if (-not $workerProvider -and $profile.workerProvider) { $workerProvider = $profile.workerProvider }
+            if (-not $workerAgent -and $profile.workerAgent) { $workerAgent = $profile.workerAgent }
+            if (-not $reviewerModel -and $profile.reviewerModel) { $reviewerModel = $profile.reviewerModel }
+            if (-not $reviewerProvider -and $profile.reviewerProvider) { $reviewerProvider = $profile.reviewerProvider }
+            if (-not $reviewerAgent -and $profile.reviewerAgent) { $reviewerAgent = $profile.reviewerAgent }
+            if (-not $monitorModel -and $profile.monitorModel) { $monitorModel = $profile.monitorModel }
+            if (-not $monitorProvider -and $profile.monitorProvider) { $monitorProvider = $profile.monitorProvider }
+            if (-not $monitorAgent -and $profile.monitorAgent) { $monitorAgent = $profile.monitorAgent }
+            if (-not $workGuidelines -and $profile.workGuidelines) { $workGuidelines = $profile.workGuidelines }
+            if (-not $reviewGuidelines -and $profile.reviewGuidelines) { $reviewGuidelines = $profile.reviewGuidelines }
+            if ($profile.maxIterations) { $maxIterations = [int]$profile.maxIterations }
+            if ($profile.initialBackoff) { $initialBackoff = [int]$profile.initialBackoff 
+            if ($profile.throttleDelay) { $throttleDelay = [int]$profile.throttleDelay }
+            # Extract profile name for tracking
+            $currentProfile = Split-Path $profilePath -Leaf
+            $currentProfile = $currentProfile -replace '\.json$', ''
+            Write-Host "[PROFILE] Loaded profile: $currentProfile" -ForegroundColor Cyan
+        } else {
+            Write-Host "[ERROR] Profile not found: $cliProfile" -ForegroundColor Red
+            exit 1
+        }
+    }
 
     if (-not $workerModel) { Write-Host -NoNewline "Worker model: "; $workerModel = Read-Host; if (-not $workerModel) { exit 1 } }
     if (-not $workerProvider) { Write-Host -NoNewline "Worker provider (anthropic/openai/google/goose/copilot): "; $workerProvider = Read-Host; if (-not $workerProvider) { exit 1 } }
@@ -802,22 +978,8 @@ function Run-Cli {
     if ($maxIterations -eq -1) { Write-Host "Max Iterations: unlimited" } else { Write-Host "Max Iterations: $maxIterations" }
     Write-Host ""
 
-    # Validate adaptive strategy and resolve start profile
-    if ($enableAdaptive) {
-        if ($script:AdaptiveOrders -notcontains $adaptiveStrategy) {
-            Write-Host "[WARNING] Unknown adaptive strategy '$adaptiveStrategy'; falling back to 'balanced'." -ForegroundColor Yellow
-            $adaptiveStrategy = 'balanced'
-        }
-        if (-not $currentProfile) {
-            $currentProfile = $script:AdaptiveOrders[$adaptiveStrategy]['start']
-            Write-Host "[ADAPTIVE] Strategy '$adaptiveStrategy' (start profile '$currentProfile')" -ForegroundColor Cyan
-        } else {
-            Write-Host "[ADAPTIVE] Strategy '$adaptiveStrategy' (starting from '$currentProfile')" -ForegroundColor Cyan
-        }
-    }
-
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $true -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $true -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay
 
     $feedback = ''
     $iteration = 1
@@ -955,6 +1117,8 @@ function Handle-Initialize {
     $sessionId = Coalesce $paramsObj['sessionId'] 'default'
     $task = Coalesce $paramsObj['task'] ''
     $maxIterations = Coalesce $paramsObj['maxIterations'] 10
+    $initialBackoff = Coalesce $paramsObj['initialBackoff'] 5
+    $throttleDelay = Coalesce $paramsObj['throttleDelay'] 0
     $workerModel = Coalesce $paramsObj['workerModel'] ''
     $workerProvider = Coalesce $paramsObj['workerProvider'] ''
     $workerAgent = Coalesce $paramsObj['workerAgent'] 'goose'
@@ -973,7 +1137,7 @@ function Handle-Initialize {
     }
     
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay
     $validation = Test-CrossModel -SessionId $sessionId | JsonToDict
     $status = Get-Status -SessionId $sessionId -MaxIterations $maxIterations | JsonToDict
     $result = @{ 
@@ -1148,6 +1312,8 @@ function Handle-Run {
     $sessionId = Coalesce $paramsObj['sessionId'] 'default'
     $task = Coalesce $paramsObj['task'] ''
     $maxIterations = Coalesce $paramsObj['maxIterations'] 10
+    $initialBackoff = Coalesce $paramsObj['initialBackoff'] 5
+    $throttleDelay = Coalesce $paramsObj['throttleDelay'] 0
     $workerModel = Coalesce $paramsObj['workerModel'] ''
     $workerProvider = Coalesce $paramsObj['workerProvider'] ''
     $workerAgent = Coalesce $paramsObj['workerAgent'] 'goose'
@@ -1168,7 +1334,7 @@ function Handle-Run {
     if (-not $workerModel -or -not $workerProvider -or -not $reviewerModel -or -not $reviewerProvider) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'workerModel, workerProvider, reviewerModel, and reviewerProvider are required' } }
 
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay
 
     # Validate adaptive strategy and resolve start profile
     if ($enableAdaptive) {

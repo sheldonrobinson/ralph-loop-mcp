@@ -8,7 +8,13 @@ set -euo pipefail
 # =============================================================================
 # CONFIGURATION (from environment variables with defaults)
 # =============================================================================
-RALPH_STATE_BASE="${HOME}/.goose/ralph"
+# Directory containing this script (used as a fallback for locating profiles).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Workspace directory: base for resolving relative paths (profiles, task files, guidelines).
+# Defaults to the current working directory; overridable via --workspace.
+WORKSPACE="$(pwd)"
+
+RALPH_STATE_BASE="${WORKSPACE}/.ralph"
 RALPH_RECIPE_DIR="${RALPH_RECIPE_DIR:-/usr/local/share/ralph-loop-runner/recipes}"
 SAFE_COMMANDS=("ls" "pwd" "echo" "date" "cat" "mkdir" "rm" "cp" "mv" "jq")
 CMD_TIMEOUT=30
@@ -169,28 +175,47 @@ set_config() {
     local monitor_model="${12:-}"
     local monitor_provider="${13:-}"
     local monitor_agent="${14:-goose}"
+    local initial_backoff="${15:-5}"
+    local throttle_delay="${16:-0}"
     
     ensure_state_dir "${session_id}"
     local config_file="$(get_state_file "${session_id}" "config.json")"
     
-    cat > "${config_file}" <<EOF
-{
-  "workerModel": $(json_escape "${worker_model}"),
-  "workerProvider": $(json_escape "${worker_provider}"),
-  "workerAgent": $(json_escape "${worker_agent}"),
-  "reviewerModel": $(json_escape "${reviewer_model}"),
-  "reviewerProvider": $(json_escape "${reviewer_provider}"),
-  "reviewerAgent": $(json_escape "${reviewer_agent}"),
-  "monitorModel": $(json_escape "${monitor_model}"),
-  "monitorProvider": $(json_escape "${monitor_provider}"),
-  "monitorAgent": $(json_escape "${monitor_agent}"),
-  "maxIterations": ${max_iterations},
-  "crossModelReviewEnforced": ${cross_model_enforced},
-  "workGuidelines": $(json_escape "${work_guidelines}"),
-  "reviewGuidelines": $(json_escape "${review_guidelines}"),
-  "configuredAt": "$(date -Iseconds)"
-}
-EOF
+    jq -n \
+        --arg workerModel "${worker_model}" \
+        --arg workerProvider "${worker_provider}" \
+        --arg workerAgent "${worker_agent}" \
+        --arg reviewerModel "${reviewer_model}" \
+        --arg reviewerProvider "${reviewer_provider}" \
+        --arg reviewerAgent "${reviewer_agent}" \
+        --arg monitorModel "${monitor_model}" \
+        --arg monitorProvider "${monitor_provider}" \
+        --arg monitorAgent "${monitor_agent}" \
+        --argjson maxIterations "${max_iterations}" \
+        --argjson initialBackoff "${initial_backoff}" \
+        --argjson throttleDelay "${throttle_delay}" \
+        --argjson crossModelReviewEnforced "${cross_model_enforced}" \
+        --arg workGuidelines "${work_guidelines}" \
+        --arg reviewGuidelines "${review_guidelines}" \
+        --arg configuredAt "$(date -Iseconds)" \
+        '{
+            workerModel: $workerModel,
+            workerProvider: $workerProvider,
+            workerAgent: $workerAgent,
+            reviewerModel: $reviewerModel,
+            reviewerProvider: $reviewerProvider,
+            reviewerAgent: $reviewerAgent,
+            monitorModel: $monitorModel,
+            monitorProvider: $monitorProvider,
+            monitorAgent: $monitorAgent,
+            maxIterations: $maxIterations,
+            initialBackoff: $initialBackoff,
+            throttleDelay: $throttleDelay,
+            crossModelReviewEnforced: $crossModelReviewEnforced,
+            workGuidelines: $workGuidelines,
+            reviewGuidelines: $reviewGuidelines,
+            configuredAt: $configuredAt
+        }' > "${config_file}"
 }
 
 get_config() {
@@ -235,25 +260,48 @@ validate_cross_model() {
 # =============================================================================
 # ADAPTIVE PROFILE SWITCHING
 # =============================================================================
+# Resolve a profile name/path to an existing file.
+# Search order:
+#   1. $WORKSPACE/profiles/<name>.json
+#   2. $WORKSPACE/profiles/<name>   (name already has extension)
+#   3. $WORKSPACE/<name>            (explicit path relative to workspace)
+#   4. <name> as literal (absolute or CWD-relative) path
+#   5. Script's own profiles/ dir (fallback when run outside the project)
+resolve_profile_path() {
+    local profile_name="${1}"
+    local cand
+    local candidates=(
+        "${WORKSPACE}/profiles/${profile_name}.json"
+        "${WORKSPACE}/profiles/${profile_name}"
+        "${WORKSPACE}/${profile_name}"
+        "${profile_name}"
+        "${SCRIPT_DIR}/profiles/${profile_name}.json"
+        "${SCRIPT_DIR}/profiles/${profile_name}"
+    )
+    for cand in "${candidates[@]}"; do
+        if [[ -f "${cand}" ]]; then
+            echo "${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Apply a named/pathed profile to a session's config.json
 apply_profile() {
     local session_id="${1}"
     local profile_name="${2}"
 
     local profile_path
-    if [[ -f "profiles/${profile_name}.json" ]]; then
-        profile_path="profiles/${profile_name}.json"
-    elif [[ -f "${profile_name}" ]]; then
-        profile_path="${profile_name}"
-    else
-        echo "[ERROR] Profile file not found: profiles/${profile_name}.json" >&2
+    if ! profile_path="$(resolve_profile_path "${profile_name}")"; then
+        echo "[ERROR] Profile file not found: ${profile_name}" >&2
         return 1
     fi
 
     ensure_state_dir "${session_id}"
 
-    local worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent
-    local monitor_model monitor_provider monitor_agent max_iterations work_guidelines review_guidelines
+    local worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent
+    local max_iterations initial_backoff throttle_delay work_guidelines review_guidelines
     worker_model=$(jq -r '.workerModel // empty' "${profile_path}")
     worker_provider=$(jq -r '.workerProvider // empty' "${profile_path}")
     worker_agent=$(jq -r '.workerAgent // "goose"' "${profile_path}")
@@ -264,10 +312,12 @@ apply_profile() {
     monitor_provider=$(jq -r '.monitorProvider // empty' "${profile_path}")
     monitor_agent=$(jq -r '.monitorAgent // "goose"' "${profile_path}")
     max_iterations=$(jq -r '.maxIterations // 10' "${profile_path}")
+    initial_backoff=$(jq -r '.initialBackoff // 5' "${profile_path}")
+    throttle_delay=$(jq -r '.throttleDelay // 0' "${profile_path}")
     work_guidelines=$(jq -r '.workGuidelines // empty' "${profile_path}")
     review_guidelines=$(jq -r '.reviewGuidelines // empty' "${profile_path}")
 
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
 
     echo "[ADAPTIVE] Applied profile: ${profile_name}" >&2
     return 0
@@ -388,6 +438,8 @@ switch_adaptive_profile() {
     monitor_provider=$(echo "${config}" | jq -r '.monitorProvider // empty')
     monitor_agent=$(echo "${config}" | jq -r '.monitorAgent // "goose"')
     max_iterations=$(echo "${config}" | jq -r '.maxIterations // 10')
+    initial_backoff=$(echo "${config}" | jq -r '.initialBackoff // 5')
+    throttle_delay=$(echo "${config}" | jq -r '.throttleDelay // 5')
 
     echo "${worker_model}|${worker_provider}|${worker_agent}|${reviewer_model}|${reviewer_provider}|${reviewer_agent}|${monitor_model}|${monitor_provider}|${monitor_agent}|${max_iterations}"
 }
@@ -399,12 +451,8 @@ set_task() {
     local task="${2}"
     ensure_state_dir "${session_id}"
     local task_file="$(get_state_file "${session_id}" "task.json")"
-    cat > "${task_file}" <<EOF
-{
-  "task": $(json_escape "${task}"),
-  "createdAt": "$(date -Iseconds)"
-}
-EOF
+    jq -n --arg task "${task}" --arg createdAt "$(date -Iseconds)" \
+        '{task: $task, createdAt: $createdAt}' > "${task_file}"
     rm -f "$(get_state_file "${session_id}" "RALPH-BLOCKED.md")"
 }
 
@@ -428,14 +476,12 @@ set_work() {
     local iteration="${4}"
     ensure_state_dir "${session_id}"
     local work_file="$(get_state_file "${session_id}" "work.json")"
-    cat > "${work_file}" <<EOF
-{
-  "work": $(json_escape "${work}"),
-  "summary": $(json_escape "${summary}"),
-  "submittedAt": "$(date -Iseconds)",
-  "iteration": ${iteration}
-}
-EOF
+    jq -n \
+        --arg work "${work}" \
+        --arg summary "${summary}" \
+        --arg submittedAt "$(date -Iseconds)" \
+        --argjson iteration "${iteration}" \
+        '{work: $work, summary: $summary, submittedAt: $submittedAt, iteration: $iteration}' > "${work_file}"
     echo '{"ok":true}' > "$(get_state_file "${session_id}" "work-complete.txt")"
 
     # Persist iteration history
@@ -468,16 +514,14 @@ set_review() {
     local iteration="${4}"
     ensure_state_dir "${session_id}"
     local review_file="$(get_state_file "${session_id}" "review.json")"
-    cat > "${review_file}" <<EOF
-{
-  "decision": $(json_escape "${decision}"),
-  "feedback": $(json_escape "${feedback}"),
-  "reviewedAt": "$(date -Iseconds)",
-  "iteration": ${iteration}
-}
-EOF
-    echo "{\"decision\":$(json_escape "${decision}")}" > "$(get_state_file "${session_id}" "review-result.txt")"
-    echo "{\"feedback\":$(json_escape "${feedback}")}" > "$(get_state_file "${session_id}" "review-feedback.txt")"
+    jq -n \
+        --arg decision "${decision}" \
+        --arg feedback "${feedback}" \
+        --arg reviewedAt "$(date -Iseconds)" \
+        --argjson iteration "${iteration}" \
+        '{decision: $decision, feedback: $feedback, reviewedAt: $reviewedAt, iteration: $iteration}' > "${review_file}"
+    jq -n --arg decision "${decision}" '{decision: $decision}' > "$(get_state_file "${session_id}" "review-result.txt")"
+    jq -n --arg feedback "${feedback}" '{feedback: $feedback}' > "$(get_state_file "${session_id}" "review-feedback.txt")"
     
     # Persist iteration history
     local hist_dir="$(get_state_dir "${session_id}")/history/iteration_${iteration}"
@@ -1016,6 +1060,7 @@ run_cli() {
     local initial_backoff="${RALPH_INITIAL_BACKOFF}"
     local throttle_delay="${RALPH_THROTTLE_DELAY}"
     local task_input=""
+    local workspace="${WORKSPACE}"
     
     # Parse command line arguments - options first, then task as final positional arg
     while [[ $# -gt 0 ]]; do
@@ -1042,6 +1087,7 @@ run_cli() {
                 echo "  --throttle-delay N           Delay between requests in seconds (default: \$RALPH_THROTTLE_DELAY)"
                 echo "  --enable-adaptive            Enable adaptive profile switching"
                 echo "  --adaptive-strategy STRATEGY Adaptive strategy: quality, price, or balanced (default: balanced)"
+                echo "  --workspace DIR              Workspace directory (default: current working directory)"
                 exit 0
                 ;;
             --worker-model)
@@ -1112,6 +1158,10 @@ run_cli() {
                 adaptive_strategy="${2}"
                 shift 2
                 ;;
+            --workspace)
+                workspace="${2}"
+                shift 2
+                ;;
             --session-id)
                 CLI_SESSION_ID="${2}"
                 shift 2
@@ -1133,10 +1183,24 @@ run_cli() {
     RALPH_INITIAL_BACKOFF="${initial_backoff}"
     RALPH_THROTTLE_DELAY="${throttle_delay}"
     
-    # Get task from file or argument
+    # Normalize workspace: resolve to an absolute path so relative paths resolve against it.
+    if [[ -n "${workspace}" ]]; then
+        WORKSPACE="$(cd "${workspace}" 2>/dev/null && pwd || echo "${workspace}")"
+        RALPH_STATE_BASE="${WORKSPACE}/.ralph"
+    fi
+    
+    # Get task from file or argument (resolve relative to workspace first)
     local task
-    if [[ -f "${task_input}" ]]; then
-        task=$(cat "${task_input}")
+    local task_file=""
+    if [[ -n "${task_input}" ]]; then
+        if [[ -f "${task_input}" ]]; then
+            task_file="${task_input}"
+        elif [[ -f "${WORKSPACE}/${task_input}" ]]; then
+            task_file="${WORKSPACE}/${task_input}"
+        fi
+    fi
+    if [[ -n "${task_file}" ]]; then
+        task=$(cat "${task_file}")
     else
         task="${task_input}"
     fi
@@ -1223,7 +1287,7 @@ run_cli() {
     
     # Initialize session
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
 
     # Validate adaptive strategy and resolve start profile
     if [[ "${enable_adaptive}" == "true" ]]; then
@@ -1399,11 +1463,13 @@ handle_initialize() {
     local params="${2}"
     local session_id task max_iterations worker_model worker_provider worker_agent
     local reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent
-    local cross_model_enforced work_guidelines review_guidelines
+    local cross_model_enforced work_guidelines review_guidelines initial_backoff throttle_delay
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
     max_iterations=$(echo "${params}" | jq -r '.maxIterations // 10')
+    initial_backoff=$(echo "${params}" | jq -r '.initialBackoff // 5')
+    throttle_delay=$(echo "${params}" | jq -r '.throttleDelay // 0')
     worker_model=$(echo "${params}" | jq -r '.workerModel // empty')
     worker_provider=$(echo "${params}" | jq -r '.workerProvider // empty')
     worker_agent=$(echo "${params}" | jq -r '.workerAgent // "goose"')
@@ -1423,7 +1489,7 @@ handle_initialize() {
     fi
     
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
     
     local validation
     validation=$(validate_cross_model "${session_id}")
@@ -1660,11 +1726,13 @@ handle_block() {
 handle_run() {
     local id="${1}"
     local params="${2}"
-    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent enable_adaptive adaptive_strategy current_profile
+    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent enable_adaptive adaptive_strategy current_profile initial_backoff throttle_delay
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
     max_iterations=$(echo "${params}" | jq -r '.maxIterations // 10')
+    initial_backoff=$(echo "${params}" | jq -r '.initialBackoff // 5')
+    throttle_delay=$(echo "${params}" | jq -r '.throttleDelay // 0')
     enable_adaptive=$(echo "${params}" | jq -r '.enableAdaptive // false')
     adaptive_strategy=$(echo "${params}" | jq -r '.adaptiveStrategy // "balanced"')
     current_profile=$(echo "${params}" | jq -r '.profile // empty')
@@ -1692,7 +1760,7 @@ handle_run() {
     fi
     
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
 
     # Validate adaptive strategy and resolve start profile
     if [[ "${enable_adaptive}" == "true" ]]; then

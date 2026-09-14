@@ -50,7 +50,7 @@ The Ralph Loop implements a two-phase iterative workflow:
   - **MCP Server Mode** — JSON-RPC 2.0 over stdio with standard MCP `tools/list` JSON Schemas for integration with AI agents
   - **CLI Mode** — Run the full loop directly from command line
 - **Session-based**: Multiple concurrent Ralph Loop sessions supported
-- **File-based State**: Persistent state and historical iteration artifacts stored in `~/.goose/ralph/{sessionId}/history/`
+- **File-based State**: Persistent state and historical iteration artifacts stored in `<workspace>/.ralph/{sessionId}/history/`
 - **11 MCP Tools**: Complete workflow control via MCP tools, including `ralph_loop_run` for full automation
 - **Cross-Model Review**: Worker/reviewer model configuration with validation
 - **Monitoring Agent**: Automatic fallback parsing of worker/reviewer outputs
@@ -206,7 +206,7 @@ This tool handles:
 1. **Initialization** - Creates session with worker/reviewer configuration
 2. **Orchestration** - Loops through WORK → REVIEW phases
 3. **Execution** - Calls LLM providers via CLI (claude, openai, gemini, copilot, goose)
-4. **State Management** - Persists all state to `~/.goose/ralph/{sessionId}/`
+4. **State Management** - Persists all state to `<workspace>/.ralph/{sessionId}/`
 
 ### Manual Step-by-Step Workflow
 
@@ -307,10 +307,10 @@ For more control, use individual tools:
 
 ## State Management
 
-State is stored in `~/.goose/ralph/{sessionId}/` with persistent iteration history:
+State is stored in `<workspace>/.ralph/{sessionId}/` with persistent iteration history:
 
 ```
-~/.goose/ralph/my-feature/
+<workspace>/.ralph/my-feature/
 ├── config.json           # Worker/reviewer/monitor model configuration
 ├── task.json             # Original task
 ├── work.json             # Current work submission
@@ -413,6 +413,7 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
 | `--work-guidelines FILE` | Work guidelines/recipe file |
 | `--review-guidelines FILE` | Review guidelines/recipe file |
 | `--session-id ID` | Custom session ID |
+| `--workspace DIR` | Workspace directory used as the base for resolving relative paths (profiles, task files, guidelines). Defaults to the directory the script is run from. |
 
 ## Supported Providers
 
