@@ -104,20 +104,42 @@ is_rate_limit_error() {
 
 # Rate throttling helper
 apply_rate_throttling() {
-    if [[ "${RALPH_THROTTLE_DELAY}" -gt 0 ]]; then
-        sleep "${RALPH_THROTTLE_DELAY}"
+    local throttle_delay="${1:-${RALPH_THROTTLE_DELAY}}"
+    if [[ "${throttle_delay}" -gt 0 ]]; then
+        sleep "${throttle_delay}"
     fi
 }
 
 # Retry helper with exponential backoff and rate throttling for LLM execution
+# Usage: execute_llm_with_retry <role_name> <session_id> <command...>
+# If session_id is provided, retry config is read from session config.json
+# Otherwise falls back to global env vars
 execute_llm_with_retry() {
-    apply_rate_throttling
     local role_name="$1"
-    shift
+    local session_id="$2"
+    shift 2
     local cmd=("$@")
+    
+    # Load retry config from session config if session_id provided
+    local max_retries="${RALPH_MAX_RETRIES}"
+    local initial_backoff="${RALPH_INITIAL_BACKOFF}"
+    local throttle_delay="${RALPH_THROTTLE_DELAY}"
+    
+    if [[ -n "${session_id}" && "${session_id}" != "default" ]]; then
+        local config
+        config=$(get_config "${session_id}")
+        if [[ -n "${config}" ]]; then
+            max_retries=$(echo "${config}" | jq -r '.maxRetries // 3')
+            initial_backoff=$(echo "${config}" | jq -r '.initialBackoff // 5')
+            throttle_delay=$(echo "${config}" | jq -r '.throttleDelay // 0')
+        fi
+    fi
+    
+    apply_rate_throttling "${throttle_delay}"
+    
     local attempt=1
-    local backoff="${RALPH_INITIAL_BACKOFF}"
-    local max_attempts=$((RALPH_MAX_RETRIES + 1))
+    local backoff="${initial_backoff}"
+    local max_attempts=$((max_retries + 1))
     local output=""
     local exit_code=0
 
@@ -136,13 +158,13 @@ execute_llm_with_retry() {
         # Check for rate limit or transient error
         if is_rate_limit_error "${output}" || [[ ${exit_code} -ne 0 ]]; then
             if [[ ${attempt} -lt ${max_attempts} ]]; then
-                echo "[WARN]  [${role_name}] Rate limit / resource constraint detected on attempt ${attempt}/${RALPH_MAX_RETRIES}. Retrying in ${backoff}s..." >&2
+                echo "[WARN]  [${role_name}] Rate limit / resource constraint detected on attempt ${attempt}/${max_retries}. Retrying in ${backoff}s..." >&2
                 sleep "${backoff}"
                 backoff=$((backoff * 2))
                 attempt=$((attempt + 1))
                 continue
             else
-                echo "[WARN] [${role_name}] Rate limit / quota error persisted after ${RALPH_MAX_RETRIES} retries." >&2
+                echo "[WARN] [${role_name}] Rate limit / quota error persisted after ${max_retries} retries." >&2
                 if is_rate_limit_error "${output}"; then
                     echo "RATE_LIMIT_EXCEEDED: ${output}"
                 fi
@@ -177,6 +199,7 @@ set_config() {
     local monitor_agent="${14:-goose}"
     local initial_backoff="${15:-5}"
     local throttle_delay="${16:-0}"
+    local max_retries="${17:-3}"
     
     ensure_state_dir "${session_id}"
     local config_file="$(get_state_file "${session_id}" "config.json")"
@@ -194,6 +217,7 @@ set_config() {
         --argjson maxIterations "${max_iterations}" \
         --argjson initialBackoff "${initial_backoff}" \
         --argjson throttleDelay "${throttle_delay}" \
+        --argjson maxRetries "${max_retries}" \
         --argjson crossModelReviewEnforced "${cross_model_enforced}" \
         --arg workGuidelines "${work_guidelines}" \
         --arg reviewGuidelines "${review_guidelines}" \
@@ -211,6 +235,7 @@ set_config() {
             maxIterations: $maxIterations,
             initialBackoff: $initialBackoff,
             throttleDelay: $throttleDelay,
+            maxRetries: $maxRetries,
             crossModelReviewEnforced: $crossModelReviewEnforced,
             workGuidelines: $workGuidelines,
             reviewGuidelines: $reviewGuidelines,
@@ -301,7 +326,7 @@ apply_profile() {
     ensure_state_dir "${session_id}"
 
     local worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent
-    local max_iterations initial_backoff throttle_delay work_guidelines review_guidelines
+    local max_iterations initial_backoff throttle_delay max_retries work_guidelines review_guidelines
     worker_model=$(jq -r '.workerModel // empty' "${profile_path}")
     worker_provider=$(jq -r '.workerProvider // empty' "${profile_path}")
     worker_agent=$(jq -r '.workerAgent // "goose"' "${profile_path}")
@@ -314,10 +339,11 @@ apply_profile() {
     max_iterations=$(jq -r '.maxIterations // 10' "${profile_path}")
     initial_backoff=$(jq -r '.initialBackoff // 5' "${profile_path}")
     throttle_delay=$(jq -r '.throttleDelay // 0' "${profile_path}")
+    max_retries=$(jq -r '.maxRetries // 3' "${profile_path}")
     work_guidelines=$(jq -r '.workGuidelines // empty' "${profile_path}")
     review_guidelines=$(jq -r '.reviewGuidelines // empty' "${profile_path}")
 
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}" "${max_retries}"
 
     echo "[ADAPTIVE] Applied profile: ${profile_name}" >&2
     return 0
@@ -414,7 +440,7 @@ get_adaptive_profile_switch() {
 }
 
 # Switch profile and echo back the new config values as pipe-delimited:
-# worker_model|worker_provider|worker_agent|reviewer_model|reviewer_provider|reviewer_agent|monitor_model|monitor_provider|monitor_agent|max_iterations
+# worker_model|worker_provider|worker_agent|reviewer_model|reviewer_provider|reviewer_agent|monitor_model|monitor_provider|monitor_agent|max_iterations|initial_backoff|throttle_delay|max_retries
 switch_adaptive_profile() {
     local session_id="${1}"
     local new_profile="${2}"
@@ -427,7 +453,7 @@ switch_adaptive_profile() {
     config=$(get_config "${session_id}")
 
     local worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent
-    local monitor_model monitor_provider monitor_agent max_iterations
+    local monitor_model monitor_provider monitor_agent max_iterations initial_backoff throttle_delay max_retries
     worker_model=$(echo "${config}" | jq -r '.workerModel // empty')
     worker_provider=$(echo "${config}" | jq -r '.workerProvider // empty')
     worker_agent=$(echo "${config}" | jq -r '.workerAgent // "goose"')
@@ -439,9 +465,10 @@ switch_adaptive_profile() {
     monitor_agent=$(echo "${config}" | jq -r '.monitorAgent // "goose"')
     max_iterations=$(echo "${config}" | jq -r '.maxIterations // 10')
     initial_backoff=$(echo "${config}" | jq -r '.initialBackoff // 5')
-    throttle_delay=$(echo "${config}" | jq -r '.throttleDelay // 5')
+    throttle_delay=$(echo "${config}" | jq -r '.throttleDelay // 0')
+    max_retries=$(echo "${config}" | jq -r '.maxRetries // 3')
 
-    echo "${worker_model}|${worker_provider}|${worker_agent}|${reviewer_model}|${reviewer_provider}|${reviewer_agent}|${monitor_model}|${monitor_provider}|${monitor_agent}|${max_iterations}"
+    echo "${worker_model}|${worker_provider}|${worker_agent}|${reviewer_model}|${reviewer_provider}|${reviewer_agent}|${monitor_model}|${monitor_provider}|${monitor_agent}|${max_iterations}|${initial_backoff}|${throttle_delay}|${max_retries}"
 }
 # =============================================================================
 # TASK MANAGEMENT
@@ -773,16 +800,16 @@ SUMMARY:
     
     case "${worker_agent}" in
         anthropic)
-            execute_llm_with_retry "WORKER" bash -c "echo $(json_escape "${prompt}") | claude --model ${worker_model} --print"
+            execute_llm_with_retry "WORKER" "${session_id}" bash -c "echo $(json_escape "${prompt}") | claude --model ${worker_model} --print"
             ;;
         openai)
-            execute_llm_with_retry "WORKER" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${worker_model} --no-stream"
+            execute_llm_with_retry "WORKER" "${session_id}" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${worker_model} --no-stream"
             ;;
         google)
-            execute_llm_with_retry "WORKER" bash -c "echo $(json_escape "${prompt}") | gemini --model ${worker_model} --format=text"
+            execute_llm_with_retry "WORKER" "${session_id}" bash -c "echo $(json_escape "${prompt}") | gemini --model ${worker_model} --format=text"
             ;;
         copilot)
-            execute_llm_with_retry "WORKER" copilot -p --allow-all-tools "${prompt}"
+            execute_llm_with_retry "WORKER" "${session_id}" copilot -p --allow-all-tools "${prompt}"
             ;;
         goose)
             local goose_args=("run")
@@ -804,7 +831,7 @@ SUMMARY:
             fi
             goose_args+=("--text" "${prompt}")
             
-            execute_llm_with_retry "WORKER" env GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" goose "${goose_args[@]}"
+            execute_llm_with_retry "WORKER" "${session_id}" env GOOSE_MODEL="${worker_model}" GOOSE_PROVIDER="${worker_provider}" goose "${goose_args[@]}"
             ;;
         *)
             echo "Error: Unknown agent ${worker_agent}" >&2
@@ -843,16 +870,16 @@ FEEDBACK: [your feedback, or empty if SHIP]"
     
     case "${reviewer_agent}" in
         anthropic)
-            execute_llm_with_retry "REVIEWER" bash -c "echo $(json_escape "${prompt}") | claude --model ${reviewer_model} --print"
+            execute_llm_with_retry "REVIEWER" "${session_id}" bash -c "echo $(json_escape "${prompt}") | claude --model ${reviewer_model} --print"
             ;;
         openai)
-            execute_llm_with_retry "REVIEWER" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${reviewer_model} --no-stream"
+            execute_llm_with_retry "REVIEWER" "${session_id}" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${reviewer_model} --no-stream"
             ;;
         google)
-            execute_llm_with_retry "REVIEWER" bash -c "echo $(json_escape "${prompt}") | gemini --model ${reviewer_model} --format=text"
+            execute_llm_with_retry "REVIEWER" "${session_id}" bash -c "echo $(json_escape "${prompt}") | gemini --model ${reviewer_model} --format=text"
             ;;
         copilot)
-            execute_llm_with_retry "REVIEWER" copilot -p --allow-all-tools "${prompt}"
+            execute_llm_with_retry "REVIEWER" "${session_id}" copilot -p --allow-all-tools "${prompt}"
             ;;
         goose)
             local goose_args=("run")
@@ -870,7 +897,7 @@ FEEDBACK: [your feedback, or empty if SHIP]"
             fi
             goose_args+=("--text" "${prompt}")
             
-            execute_llm_with_retry "REVIEWER" env GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" goose "${goose_args[@]}"
+            execute_llm_with_retry "REVIEWER" "${session_id}" env GOOSE_MODEL="${reviewer_model}" GOOSE_PROVIDER="${reviewer_provider}" goose "${goose_args[@]}"
             ;;
         *)
             echo "Error: Unknown agent ${reviewer_agent}" >&2
@@ -881,9 +908,10 @@ FEEDBACK: [your feedback, or empty if SHIP]"
 
 call_llm_monitor() {
     local prompt="$1"
-    local monitor_model="${2:-${MONITOR_MODEL}}"
-    local monitor_provider="${3:-${MONITOR_PROVIDER}}"
-    local monitor_agent="${4:-${MONITOR_AGENT}}"
+    local session_id="${2:-}"
+    local monitor_model="${3:-${MONITOR_MODEL}}"
+    local monitor_provider="${4:-${MONITOR_PROVIDER}}"
+    local monitor_agent="${5:-${MONITOR_AGENT}}"
     
     # Fall back to worker settings if monitor not configured
     if [[ -z "${monitor_model}" ]]; then monitor_model="${WORKER_MODEL}"; fi
@@ -892,29 +920,30 @@ call_llm_monitor() {
     
     case "${monitor_agent}" in
         anthropic)
-            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | claude --model ${monitor_model} --print"
+            execute_llm_with_retry "MONITOR" "${session_id}" bash -c "echo $(json_escape "${prompt}") | claude --model ${monitor_model} --print"
             ;;
         openai)
-            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${monitor_model} --no-stream"
+            execute_llm_with_retry "MONITOR" "${session_id}" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${monitor_model} --no-stream"
             ;;
         google)
-            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | gemini --model ${monitor_model} --format=text"
+            execute_llm_with_retry "MONITOR" "${session_id}" bash -c "echo $(json_escape "${prompt}") | gemini --model ${monitor_model} --format=text"
             ;;
         goose)
-            execute_llm_with_retry "MONITOR" env GOOSE_MODEL="${monitor_model}" GOOSE_PROVIDER="${monitor_provider}" goose run --no-session --text "${prompt}"
+            execute_llm_with_retry "MONITOR" "${session_id}" env GOOSE_MODEL="${monitor_model}" GOOSE_PROVIDER="${monitor_provider}" goose run --no-session --text "${prompt}"
             ;;
         *)
-            execute_llm_with_retry "MONITOR" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${monitor_model} --no-stream"
+            execute_llm_with_retry "MONITOR" "${session_id}" bash -c "echo $(json_escape "${prompt}") | openai chat --model ${monitor_model} --no-stream"
             ;;
     esac
 }
 
 parse_worker_output() {
     local output="$1"
-    local monitor_model="${2:-}"
-    local monitor_provider="${3:-}"
-    local monitor_agent="${4:-}"
-    local output_file="${5:-}"
+    local session_id="${2:-}"
+    local monitor_model="${3:-}"
+    local monitor_provider="${4:-}"
+    local monitor_agent="${5:-}"
+    local output_file="${6:-}"
     
     local work=""
     local summary=""
@@ -960,7 +989,7 @@ ${output}"
         fi
         
         local monitor_response
-        monitor_response=$(call_llm_monitor "${monitor_prompt}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
+        monitor_response=$(call_llm_monitor "${monitor_prompt}" "${session_id}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
         if [[ -n "${monitor_response}" ]]; then
             if [[ "${monitor_response}" == *"WORK:"* ]]; then
                 work=$(echo "${monitor_response}" | awk '/^WORK:/{flag=1; next} /^SUMMARY:/{flag=0} flag')
@@ -982,10 +1011,11 @@ ${output}"
 
 parse_reviewer_output() {
     local output="$1"
-    local monitor_model="${2:-}"
-    local monitor_provider="${3:-}"
-    local monitor_agent="${4:-}"
-    local output_file="${5:-}"
+    local session_id="${2:-}"
+    local monitor_model="${3:-}"
+    local monitor_provider="${4:-}"
+    local monitor_agent="${5:-}"
+    local output_file="${6:-}"
     
     local decision=""
     local feedback=""
@@ -1019,7 +1049,7 @@ ${output}"
         fi
         
         local monitor_response
-        monitor_response=$(call_llm_monitor "${monitor_prompt}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
+        monitor_response=$(call_llm_monitor "${monitor_prompt}" "${session_id}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}")
         if [[ -n "${monitor_response}" ]]; then
             if [[ "${monitor_response}" == *"DECISION:"* ]]; then
                 decision=$(echo "${monitor_response}" | awk '/^DECISION:/{print toupper($2); exit}')
@@ -1287,7 +1317,7 @@ run_cli() {
     
     # Initialize session
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "true" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}" "${max_retries}"
 
     # Validate adaptive strategy and resolve start profile
     if [[ "${enable_adaptive}" == "true" ]]; then
@@ -1344,7 +1374,7 @@ run_cli() {
                     local sw_values
                     sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
                     current_profile="${new_profile}"
-                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations initial_backoff throttle_delay max_retries <<< "${sw_values}"
                     echo "[ADAPTIVE] Retrying work phase with upgraded profile '${current_profile}'" >&2
                     worker_output=$(call_llm_worker "${task}" "${feedback}" "${iteration}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
                 fi
@@ -1360,7 +1390,7 @@ run_cli() {
         echo "${worker_output}" > "${work_out_file}"
 
         local parsed work summary
-        parsed=$(parse_worker_output "${worker_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${work_out_file}")
+        parsed=$(parse_worker_output "${worker_output}" "${session_id}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${work_out_file}")
         work=$(echo "${parsed}" | cut -d'|' -f1)
         summary=$(echo "${parsed}" | cut -d'|' -f2)
         
@@ -1388,7 +1418,7 @@ run_cli() {
                     local sw_values
                     sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
                     current_profile="${new_profile}"
-                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations initial_backoff throttle_delay max_retries <<< "${sw_values}"
                     echo "[ADAPTIVE] Retrying review phase with upgraded profile '${current_profile}'" >&2
                     reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${iteration}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
                 fi
@@ -1403,7 +1433,7 @@ run_cli() {
         local review_out_file="$(get_state_file "${session_id}" "review.out")"
         echo "${reviewer_output}" > "${review_out_file}"
 
-        parsed=$(parse_reviewer_output "${reviewer_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${review_out_file}")
+        parsed=$(parse_reviewer_output "${reviewer_output}" "${session_id}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${review_out_file}")
         local decision=$(echo "${parsed}" | cut -d'|' -f1)
         feedback=$(echo "${parsed}" | cut -d'|' -f2)
         
@@ -1444,7 +1474,7 @@ run_cli() {
                     local sw_values
                     sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
                     current_profile="${new_profile}"
-                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations initial_backoff throttle_delay max_retries <<< "${sw_values}"
                 fi
             fi
         fi
@@ -1463,13 +1493,14 @@ handle_initialize() {
     local params="${2}"
     local session_id task max_iterations worker_model worker_provider worker_agent
     local reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent
-    local cross_model_enforced work_guidelines review_guidelines initial_backoff throttle_delay
+    local cross_model_enforced work_guidelines review_guidelines initial_backoff throttle_delay max_retries
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
     max_iterations=$(echo "${params}" | jq -r '.maxIterations // 10')
     initial_backoff=$(echo "${params}" | jq -r '.initialBackoff // 5')
     throttle_delay=$(echo "${params}" | jq -r '.throttleDelay // 0')
+    max_retries=$(echo "${params}" | jq -r '.maxRetries // 3')
     worker_model=$(echo "${params}" | jq -r '.workerModel // empty')
     worker_provider=$(echo "${params}" | jq -r '.workerProvider // empty')
     worker_agent=$(echo "${params}" | jq -r '.workerAgent // "goose"')
@@ -1489,7 +1520,7 @@ handle_initialize() {
     fi
     
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}" "${max_retries}"
     
     local validation
     validation=$(validate_cross_model "${session_id}")
@@ -1726,13 +1757,14 @@ handle_block() {
 handle_run() {
     local id="${1}"
     local params="${2}"
-    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent enable_adaptive adaptive_strategy current_profile initial_backoff throttle_delay
+    local session_id task max_iterations worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent cross_model_enforced work_guidelines review_guidelines monitor_model monitor_provider monitor_agent enable_adaptive adaptive_strategy current_profile initial_backoff throttle_delay max_retries
     
     session_id=$(echo "${params}" | jq -r '.sessionId // "default"')
     task=$(echo "${params}" | jq -r '.task // empty')
     max_iterations=$(echo "${params}" | jq -r '.maxIterations // 10')
     initial_backoff=$(echo "${params}" | jq -r '.initialBackoff // 5')
     throttle_delay=$(echo "${params}" | jq -r '.throttleDelay // 0')
+    max_retries=$(echo "${params}" | jq -r '.maxRetries // 3')
     enable_adaptive=$(echo "${params}" | jq -r '.enableAdaptive // false')
     adaptive_strategy=$(echo "${params}" | jq -r '.adaptiveStrategy // "balanced"')
     current_profile=$(echo "${params}" | jq -r '.profile // empty')
@@ -1760,7 +1792,7 @@ handle_run() {
     fi
     
     set_task "${session_id}" "${task}"
-    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}"
+    set_config "${session_id}" "${worker_model}" "${worker_provider}" "${reviewer_model}" "${reviewer_provider}" "${max_iterations}" "${cross_model_enforced}" "${worker_agent}" "${reviewer_agent}" "${work_guidelines}" "${review_guidelines}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${initial_backoff}" "${throttle_delay}" "${max_retries}"
 
     # Validate adaptive strategy and resolve start profile
     if [[ "${enable_adaptive}" == "true" ]]; then
@@ -1800,7 +1832,7 @@ handle_run() {
                     local sw_values
                     sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
                     current_profile="${new_profile}"
-                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations initial_backoff throttle_delay max_retries <<< "${sw_values}"
                     worker_output=$(call_llm_worker "${task}" "${feedback}" "${i}" "${session_id}" "${worker_model}" "${worker_provider}" "${worker_agent}" "${work_guidelines}" "${is_existing}")
                 fi
             fi
@@ -1815,7 +1847,7 @@ handle_run() {
         echo "${worker_output}" > "${work_out_file}"
 
         local parsed work summary
-        parsed=$(parse_worker_output "${worker_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${work_out_file}")
+        parsed=$(parse_worker_output "${worker_output}" "${session_id}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${work_out_file}")
         work=$(echo "${parsed}" | cut -d'|' -f1)
         summary=$(echo "${parsed}" | cut -d'|' -f2)
         
@@ -1837,7 +1869,7 @@ handle_run() {
                     local sw_values
                     sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
                     current_profile="${new_profile}"
-                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                    IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations initial_backoff throttle_delay max_retries <<< "${sw_values}"
                     reviewer_output=$(call_llm_reviewer "${task}" "${work}" "${summary}" "${i}" "${session_id}" "${reviewer_model}" "${reviewer_provider}" "${reviewer_agent}" "${review_guidelines}" "${is_existing}")
                 fi
             fi
@@ -1851,7 +1883,7 @@ handle_run() {
         local review_out_file="$(get_state_file "${session_id}" "review.out")"
         echo "${reviewer_output}" > "${review_out_file}"
 
-        parsed=$(parse_reviewer_output "${reviewer_output}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${review_out_file}")
+        parsed=$(parse_reviewer_output "${reviewer_output}" "${session_id}" "${monitor_model}" "${monitor_provider}" "${monitor_agent}" "${review_out_file}")
         local decision=$(echo "${parsed}" | cut -d'|' -f1)
         feedback=$(echo "${parsed}" | cut -d'|' -f2)
         
@@ -1885,7 +1917,7 @@ handle_run() {
                 local sw_values
                 sw_values=$(switch_adaptive_profile "${session_id}" "${new_profile}" "${current_profile}")
                 current_profile="${new_profile}"
-                IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations <<< "${sw_values}"
+                IFS='|' read -r worker_model worker_provider worker_agent reviewer_model reviewer_provider reviewer_agent monitor_model monitor_provider monitor_agent max_iterations initial_backoff throttle_delay max_retries <<< "${sw_values}"
             fi
         fi
     done

@@ -168,20 +168,34 @@ function Test-RateLimitError {
 }
 
 function Apply-RateThrottling {
-    if ($script:ThrottleDelay -gt 0) {
-        Start-Sleep -Seconds $script:ThrottleDelay
+    param([int]$ThrottleDelay = 0)
+    if ($ThrottleDelay -gt 0) {
+        Start-Sleep -Seconds $ThrottleDelay
     }
 }
 
 function Invoke-LlmWithRetry {
     param(
         [string]$RoleName,
+        [string]$SessionId,
         [scriptblock]$ScriptBlock
     )
-    Apply-RateThrottling
+    # Load retry config from session config if session_id provided
+    $maxRetries = $script:MaxRetries
+    $initialBackoff = $script:InitialBackoff
+    $throttleDelay = $script:ThrottleDelay
+    if ($SessionId -and $SessionId -ne 'default') {
+        $config = Get-Config -SessionId $SessionId | JsonToDict
+        if ($config) {
+            $maxRetries = [int](Coalesce $config['maxRetries'] 3)
+            $initialBackoff = [int](Coalesce $config['initialBackoff'] 5)
+            $throttleDelay = [int](Coalesce $config['throttleDelay'] 0)
+        }
+    }
+    Apply-RateThrottling -ThrottleDelay $throttleDelay
     $attempt = 1
-    $backoff = $script:InitialBackoff
-    $maxAttempts = $script:MaxRetries + 1
+    $backoff = $initialBackoff
+    $maxAttempts = $maxRetries + 1
     $output = ''
 
     while ($attempt -le $maxAttempts) {
@@ -192,13 +206,13 @@ function Invoke-LlmWithRetry {
 
         if ((Test-RateLimitError -Output $output) -or (-not $output)) {
             if ($attempt -lt $maxAttempts) {
-                Write-Host "[WARN] [$RoleName] Rate limit / resource constraint detected on attempt $attempt/$($script:MaxRetries). Retrying in ${backoff}s..." -ForegroundColor Yellow
+                Write-Host "[WARN] [$RoleName] Rate limit / resource constraint detected on attempt $attempt/$maxRetries. Retrying in ${backoff}s..." -ForegroundColor Yellow
                 Start-Sleep -Seconds $backoff
                 $backoff = $backoff * 2
                 $attempt++
                 continue
             } else {
-                Write-Host "[ERROR] [$RoleName] Rate limit / quota error persisted after $($script:MaxRetries) retries." -ForegroundColor Red
+                Write-Host "[ERROR] [$RoleName] Rate limit / quota error persisted after $maxRetries retries." -ForegroundColor Red
                 if (Test-RateLimitError -Output $output) {
                     return "RATE_LIMIT_EXCEEDED: $output"
                 }
@@ -230,7 +244,8 @@ function Set-Config {
         [string]$MonitorProvider = '',
         [string]$MonitorAgent = 'goose',
         [int]$InitialBackoff = 5,
-        [int]$ThrottleDelay = 0
+        [int]$ThrottleDelay = 0,
+        [int]$MaxRetries = 3
         
     )
     Ensure-StateDir -SessionId $SessionId
@@ -248,6 +263,7 @@ function Set-Config {
         maxIterations = $MaxIterations
         initialBackoff = $InitialBackoff
         throttleDelay = $ThrottleDelay
+        maxRetries = $MaxRetries
         crossModelReviewEnforced = $CrossModelEnforced
         workGuidelines = [string]$WorkGuidelines
         reviewGuidelines = [string]$ReviewGuidelines
@@ -505,7 +521,7 @@ function Call-WorkerLlm {
     if ($Feedback) { $prompt += "Previous feedback from reviewer: $Feedback`nPlease revise your work based on this feedback.`n" }
     $prompt += "Provide your complete work output and a brief summary.`nOutput format:`nWORK:`n[your complete work here]`n`nSUMMARY:`n[brief summary of what you did]`n"
 
-    return Invoke-LlmWithRetry -RoleName 'WORKER' -ScriptBlock {
+    return Invoke-LlmWithRetry -RoleName 'WORKER' -SessionId $SessionId -ScriptBlock {
         switch ($WorkerAgent) { 
             'anthropic' { return $prompt | claude --model $WorkerModel --print 2>$null } 
             'openai'    { return $prompt | openai chat --model $WorkerModel --no-stream 2>$null } 
@@ -540,7 +556,7 @@ function Call-ReviewerLlm {
     param([string]$Task, [string]$Work, [string]$Summary, [int]$Iteration, [string]$SessionId, [string]$ReviewerModel, [string]$ReviewerProvider, [string]$ReviewerAgent, [string]$ReviewGuidelines, [bool]$IsExisting = $false)
     $prompt = "You are the REVIEWER in a Ralph Loop iteration $Iteration.`n`nOriginal Task: $Task`n`nWorker's Work:`n$Work`n`nWorker's Summary: $Summary`n`nReview this work thoroughly. Decide: SHIP (work is complete and correct) or REVISE (needs changes).`nIf REVISE, provide specific, actionable feedback for the worker.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [your feedback, or empty if SHIP]`n"
 
-    return Invoke-LlmWithRetry -RoleName 'REVIEWER' -ScriptBlock {
+    return Invoke-LlmWithRetry -RoleName 'REVIEWER' -SessionId $SessionId -ScriptBlock {
         switch ($ReviewerAgent) { 
             'anthropic' { return $prompt | claude --model $ReviewerModel --print 2>$null } 
             'openai'    { return $prompt | openai chat --model $ReviewerModel --no-stream 2>$null } 
@@ -571,7 +587,7 @@ function Call-ReviewerLlm {
 }
 
 function Call-MonitorLlm {
-    param([string]$Prompt, [string]$MonitorModel, [string]$MonitorProvider, [string]$MonitorAgent)
+    param([string]$Prompt, [string]$MonitorModel, [string]$MonitorProvider, [string]$MonitorAgent, [string]$SessionId = '')
     if (-not $MonitorModel) { $MonitorModel = $script:MonitorModel }
     if (-not $MonitorProvider) { $MonitorProvider = $script:MonitorProvider }
     if (-not $MonitorAgent) { $MonitorAgent = $script:MonitorAgent }
@@ -580,7 +596,7 @@ function Call-MonitorLlm {
     if (-not $MonitorProvider) { $config = Get-Config -SessionId $SessionId | JsonToDict; if ($config) { $MonitorProvider = Coalesce $config["monitorProvider"] "" }; if (-not $MonitorProvider) { $MonitorProvider = $script:WorkerProvider } }
     if (-not $MonitorAgent) { $config = Get-Config -SessionId $SessionId | JsonToDict; if ($config) { $MonitorAgent = Coalesce $config["monitorAgent"] "" }; if (-not $MonitorAgent) { $MonitorAgent = $script:WorkerAgent } }
 
-    return Invoke-LlmWithRetry -RoleName 'MONITOR' -ScriptBlock {
+    return Invoke-LlmWithRetry -RoleName 'MONITOR' -SessionId $SessionId -ScriptBlock {
         switch ($MonitorAgent) {
             'anthropic' { return $Prompt | claude --model $MonitorModel --print 2>$null }
             'openai'    { return $Prompt | openai chat --model $MonitorModel --no-stream 2>$null }
@@ -603,7 +619,7 @@ function Call-MonitorLlm {
 }
 
 function Parse-WorkerOutput {
-    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '', [string]$OutputFile = '')
+    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '', [string]$OutputFile = '', [string]$SessionId = '')
     $work = ''; $summary = ''
     $mWork = [regex]::Match($Output, '(?s)WORK:(.*?)SUMMARY:')
     if ($mWork.Success) { $work = $mWork.Groups[1].Value.Trim() }
@@ -618,7 +634,7 @@ function Parse-WorkerOutput {
         } else {
             $monitorPrompt = "Extract the WORK and SUMMARY sections from the following raw agent output.`n`nIf the agent created or modified files, include the file paths and key content in WORK.`nSummarize what was accomplished in SUMMARY.`n`nOutput format:`nWORK:`n[extracted work content]`n`nSUMMARY:`n[one-line summary]`n`n---`n$Output"
         }
-        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
+        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent -SessionId $SessionId
         if ($monitorResponse) {
             $mWork2 = [regex]::Match($monitorResponse, '(?s)WORK:(.*?)SUMMARY:')
             if ($mWork2.Success) { $work = $mWork2.Groups[1].Value.Trim() }
@@ -632,7 +648,7 @@ function Parse-WorkerOutput {
 }
 
 function Parse-ReviewerOutput {
-    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '', [string]$OutputFile = '')
+    param([string]$Output, [string]$MonitorModel = '', [string]$MonitorProvider = '', [string]$MonitorAgent = '', [string]$OutputFile = '', [string]$SessionId = '')
     $decision = ''; $feedback = ''
     $mDecision = [regex]::Match($Output, '(?i)DECISION:\s*(SHIP|REVISE)')
     if ($mDecision.Success) { $decision = $mDecision.Groups[1].Value.ToUpper() }
@@ -647,7 +663,7 @@ function Parse-ReviewerOutput {
         } else {
             $monitorPrompt = "Extract the DECISION (SHIP or REVISE) and FEEDBACK from the following raw agent output.`n`nOutput format:`nDECISION: SHIP or REVISE`nFEEDBACK: [the review feedback]`n`n---`n$Output"
         }
-        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent
+        $monitorResponse = Call-MonitorLlm -Prompt $monitorPrompt -MonitorModel $MonitorModel -MonitorProvider $MonitorProvider -MonitorAgent $MonitorAgent -SessionId $SessionId
         if ($monitorResponse) {
             $mDecision2 = [regex]::Match($monitorResponse, '(?i)DECISION:\s*(SHIP|REVISE)')
             if ($mDecision2.Success) { $decision = $mDecision2.Groups[1].Value.ToUpper() }
@@ -751,6 +767,9 @@ function Apply-Profile {
         monitorProvider = [string]$profile.monitorProvider
         monitorAgent = [string]$profile.monitorAgent
         maxIterations = $profile.maxIterations
+        initialBackoff = if ($profile.initialBackoff) { $profile.initialBackoff } else { 5 }
+        throttleDelay = if ($profile.throttleDelay) { $profile.throttleDelay } else { 0 }
+        maxRetries = if ($profile.maxRetries) { $profile.maxRetries } else { 3 }
         crossModelReviewEnforced = $true
         workGuidelines = [string]$profile.workGuidelines
         reviewGuidelines = [string]$profile.reviewGuidelines
@@ -783,6 +802,9 @@ function Switch-AdaptiveProfile {
         monitorProvider = Coalesce $config['monitorProvider'] ''
         monitorAgent = Coalesce $config['monitorAgent'] 'goose'
         maxIterations = Coalesce $config['maxIterations'] 10
+        initialBackoff = Coalesce $config['initialBackoff'] 5
+        throttleDelay = Coalesce $config['throttleDelay'] 0
+        maxRetries = Coalesce $config['maxRetries'] 3
     }
 }
 
@@ -919,6 +941,7 @@ function Run-Cli {
             if ($profile.maxIterations -and $maxIterations -eq $script:MaxIterations) { $maxIterations = [int]$profile.maxIterations }
             if ($profile.initialBackoff -and $initialBackoff -eq $script:InitialBackoff) { $initialBackoff = [int]$profile.initialBackoff }
             if ($profile.throttleDelay -and $throttleDelay -eq $script:ThrottleDelay) { $throttleDelay = [int]$profile.throttleDelay }
+            if ($profile.maxRetries -and $maxRetries -eq $script:MaxRetries) { $maxRetries = [int]$profile.maxRetries }
         }
     }
 
@@ -943,6 +966,7 @@ function Run-Cli {
             if ($profile.maxIterations) { $maxIterations = [int]$profile.maxIterations }
             if ($profile.initialBackoff) { $initialBackoff = [int]$profile.initialBackoff }
             if ($profile.throttleDelay) { $throttleDelay = [int]$profile.throttleDelay }
+            if ($profile.maxRetries) { $maxRetries = [int]$profile.maxRetries }
             # Extract profile name for tracking
             $currentProfile = Split-Path $profilePath -Leaf
             $currentProfile = $currentProfile -replace '\.json$', ''
@@ -979,7 +1003,7 @@ function Run-Cli {
     Write-Host ""
 
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $true -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $true -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay -MaxRetries $maxRetries
 
     $feedback = ''
     $iteration = 1
@@ -1010,6 +1034,9 @@ function Run-Cli {
                     $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
                     $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
                     $maxIterations = $sw.maxIterations
+                    $initialBackoff = $sw.initialBackoff
+                    $throttleDelay = $sw.throttleDelay
+                    $maxRetries = $sw.maxRetries
                     $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
                     Write-Host "[ADAPTIVE] Retrying work phase with upgraded profile '$currentProfile'" -ForegroundColor Cyan
                     $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $iteration -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
@@ -1049,6 +1076,9 @@ function Run-Cli {
                     $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
                     $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
                     $maxIterations = $sw.maxIterations
+                    $initialBackoff = $sw.initialBackoff
+                    $throttleDelay = $sw.throttleDelay
+                    $maxRetries = $sw.maxRetries
                     $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
                     Write-Host "[ADAPTIVE] Retrying review phase with upgraded profile '$currentProfile'" -ForegroundColor Cyan
                     $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $iteration -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting (($script:CLISessionId -ne '') -or ($iteration -gt 1))
@@ -1098,6 +1128,9 @@ function Run-Cli {
                     $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
                     $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
                     $maxIterations = $sw.maxIterations
+                    $initialBackoff = $sw.initialBackoff
+                    $throttleDelay = $sw.throttleDelay
+                    $maxRetries = $sw.maxRetries
                     $maxIter = if ($maxIterations -eq -1) { [int]::MaxValue } else { $maxIterations }
                 }
             }
@@ -1119,6 +1152,7 @@ function Handle-Initialize {
     $maxIterations = Coalesce $paramsObj['maxIterations'] 10
     $initialBackoff = Coalesce $paramsObj['initialBackoff'] 5
     $throttleDelay = Coalesce $paramsObj['throttleDelay'] 0
+    $maxRetries = [int](Coalesce $paramsObj['maxRetries'] 3)
     $workerModel = Coalesce $paramsObj['workerModel'] ''
     $workerProvider = Coalesce $paramsObj['workerProvider'] ''
     $workerAgent = Coalesce $paramsObj['workerAgent'] 'goose'
@@ -1137,7 +1171,7 @@ function Handle-Initialize {
     }
     
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay -MaxRetries $maxRetries
     $validation = Test-CrossModel -SessionId $sessionId | JsonToDict
     $status = Get-Status -SessionId $sessionId -MaxIterations $maxIterations | JsonToDict
     $result = @{ 
@@ -1314,6 +1348,7 @@ function Handle-Run {
     $maxIterations = Coalesce $paramsObj['maxIterations'] 10
     $initialBackoff = Coalesce $paramsObj['initialBackoff'] 5
     $throttleDelay = Coalesce $paramsObj['throttleDelay'] 0
+    $maxRetries = [int](Coalesce $paramsObj['maxRetries'] 3)
     $workerModel = Coalesce $paramsObj['workerModel'] ''
     $workerProvider = Coalesce $paramsObj['workerProvider'] ''
     $workerAgent = Coalesce $paramsObj['workerAgent'] 'goose'
@@ -1334,7 +1369,7 @@ function Handle-Run {
     if (-not $workerModel -or -not $workerProvider -or -not $reviewerModel -or -not $reviewerProvider) { return New-JsonResponse -Id $Id -Error @{ code = -32602; message = 'workerModel, workerProvider, reviewerModel, and reviewerProvider are required' } }
 
     Set-Task -SessionId $sessionId -Task $task
-    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay
+    Set-Config -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -MaxIterations $maxIterations -CrossModelEnforced $crossModelEnforced -WorkerAgent $workerAgent -ReviewerAgent $reviewerAgent -WorkGuidelines $workGuidelines -ReviewGuidelines $reviewGuidelines -MonitorModel $monitorModel -MonitorProvider $monitorProvider -MonitorAgent $monitorAgent -InitialBackoff $initialBackoff -ThrottleDelay $throttleDelay -MaxRetries $maxRetries
 
     # Validate adaptive strategy and resolve start profile
     if ($enableAdaptive) {
@@ -1364,6 +1399,7 @@ function Handle-Run {
                     $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
                     $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
                     $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                    $maxIterations = $sw.maxIterations; $initialBackoff = $sw.initialBackoff; $throttleDelay = $sw.throttleDelay; $maxRetries = $sw.maxRetries
                     $workerOutput = Call-WorkerLlm -Task $task -Feedback $feedback -Iteration $i -SessionId $sessionId -WorkerModel $workerModel -WorkerProvider $workerProvider -WorkerAgent $workerAgent -WorkGuidelines $workGuidelines -IsExisting ($i -gt 1)
                 }
             }
@@ -1396,6 +1432,7 @@ function Handle-Run {
                     $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
                     $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
                     $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                    $maxIterations = $sw.maxIterations; $initialBackoff = $sw.initialBackoff; $throttleDelay = $sw.throttleDelay; $maxRetries = $sw.maxRetries
                     $reviewerOutput = Call-ReviewerLlm -Task $task -Work $work -Summary $summary -Iteration $i -SessionId $sessionId -ReviewerModel $reviewerModel -ReviewerProvider $reviewerProvider -ReviewerAgent $reviewerAgent -ReviewGuidelines $reviewGuidelines -IsExisting ($i -gt 1)
                 }
             }
@@ -1433,6 +1470,7 @@ function Handle-Run {
                 $workerModel = $sw.workerModel; $workerProvider = $sw.workerProvider; $workerAgent = $sw.workerAgent
                 $reviewerModel = $sw.reviewerModel; $reviewerProvider = $sw.reviewerProvider; $reviewerAgent = $sw.reviewerAgent
                 $monitorModel = $sw.monitorModel; $monitorProvider = $sw.monitorProvider; $monitorAgent = $sw.monitorAgent
+                $maxIterations = $sw.maxIterations; $initialBackoff = $sw.initialBackoff; $throttleDelay = $sw.throttleDelay; $maxRetries = $sw.maxRetries
             }
         }
     }

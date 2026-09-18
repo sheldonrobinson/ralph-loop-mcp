@@ -445,6 +445,9 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
   crossModelReviewEnforced?: boolean; // default: true
   workGuidelines?: string;         // path to work guidelines
   reviewGuidelines?: string;       // path to review guidelines
+  maxRetries?: number;             // default: 3 - max retry attempts for rate limits
+  initialBackoff?: number;         // default: 5 - initial retry backoff in seconds
+  throttleDelay?: number;          // default: 0 - proactive throttle delay in seconds
 }
 ```
 
@@ -524,6 +527,9 @@ This creates `RALPH-BLOCKED.md` and stops the loop until resolved.
   crossModelReviewEnforced?: boolean; // default: true
   workGuidelines?: string;         // path to work guidelines
   reviewGuidelines?: string;       // path to review guidelines
+  maxRetries?: number;             // default: 3 - max retry attempts for rate limits
+  initialBackoff?: number;         // default: 5 - initial retry backoff in seconds
+  throttleDelay?: number;          // default: 0 - proactive throttle delay in seconds
 }
 ```
 
