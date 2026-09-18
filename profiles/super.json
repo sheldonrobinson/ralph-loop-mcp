@@ -1,6 +1,9 @@
 {
     "reviewGuidelines":  "",
-    "maxIterations":  18,
+    "maxIterations":  60,
+    "initialBackoff":  60,
+    "throttleDelay":  15,
+    "maxRetries":  2,
     "monitorModel":  "nvidia/nemotron-3.5-lightning-30b-a3b",
     "reviewerAgent":  "goose",
     "workGuidelines":  "",
