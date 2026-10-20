@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ralph-wiggum-loop",
+  "version": "1.1.0",
+  "description": "Multi-model iterative development agent plugin — Ralph Loop with cross-model worker/reviewer architecture and SHIP/REVISE decision engine. Enables AI agents to run iterative self-improvement loops using any combination of LLM providers.",
+  "author": {
+    "name": "sheldonrobinson",
+    "email": "sheldon.robinson@gmail.com",
+    "url": "https://github.com/sheldonrobinson"
+  },
+  "homepage": "https://sheldonrobinson.github.io/ralph-wiggum-loop",
+  "repository": "https://github.com/sheldonrobinson/ralph-wiggum-loop",
+  "license": "MIT",
+  "keywords": [
+    "ralph-loop",
+    "multi-model",
+    "iterative-development",
+    "mcp",
+    "agent-plugin",
+    "llm",
+    "code-review",
+    "cross-model-review",
+    "self-improvement"
+  ]
+}

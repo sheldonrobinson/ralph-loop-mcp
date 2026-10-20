@@ -1,11 +1,15 @@
-node_modules/
-dist/
-*.log
-.env
+# State files (created at runtime)
+**/.ralph/
+
+# OS files
 .DS_Store
 Thumbs.db
-.ralph/
-notes/check.txt
-node_modules/
-debates/
-notes/
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log

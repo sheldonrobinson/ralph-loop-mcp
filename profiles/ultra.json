@@ -11,7 +11,7 @@
     "workerProvider":  "nvidia",
     "monitorAgent":  "goose",
     "monitorProvider":  "nvidia",
-    "workerModel":  "moonshotai/kimi-k3",
+    "workerModel":  "z-ai/glm-5.3",
     "workerAgent":  "goose",
     "reviewerProvider":  "nvidia"
 }

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "ralph-loop": {
+      "type": "stdio",
+      "command": "./bin/ralph-loop-runner.sh",
+      "args": []
+    }
+  }
+}
